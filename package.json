@@ -1,0 +1,22 @@
+{
+  "name": "davidnet-backend",
+  "scripts": {
+    "dev": "bun run --hot src/index.ts",
+    "build": "bun build ./src/index.ts --target=bun --sourcemap --outdir ./dist",
+    "docker:dev": "mkdir -p volumes && sudo chown -R 1000:1000 ./volumes && docker compose -f docker-compose.dev.yaml up --build && docker compose -f docker-compose.dev.yaml down",
+    "docker:reset": "rm -rf volumes",
+    "dbdev:push": "bun --bun drizzle-kit push --strict",
+    "dbdev:studio": "bun --bun drizzle-kit studio"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.1",
+    "hono": "^4.12.1",
+    "postgres": "^3.4.8",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/uuid": "^10.0.0",
+    "drizzle-kit": "^0.31.9"
+  }
+}

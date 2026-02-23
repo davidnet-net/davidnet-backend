@@ -1,0 +1,9 @@
+# secrets
+.env
+
+# deps
+node_modules/
+dist/
+
+# Volumes
+volumes/
