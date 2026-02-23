@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { healthCheck } from './core/health/health'
+import { setupNextHealthBeat, stopHealthBeat } from './core/health/health'
 import { registerRoutes } from './routes';
 import { closeDbConnection } from './core/database/client';
 
@@ -9,10 +9,12 @@ let server: Bun.Server<undefined> | undefined = undefined;
 
 async function init() {
   console.log("[Init]: Starting backend.");
-  console.log("[Init]: Running healthCheck.");
-  await healthCheck();
+
+  console.log("[Init]: Starting healthBeat.");
+  setupNextHealthBeat();
+
   console.log("[Init]: Registering routes.")
-  await registerRoutes();
+  await registerRoutes(app);
 
   server = Bun.serve({
     fetch: app.fetch,
@@ -27,6 +29,7 @@ async function init() {
 const handleShutdown = async (signal: string) => {
   console.log(`[Shutdown]: Received ${signal}. Closing server...`);
   
+  stopHealthBeat();
   await server?.stop();
   await closeDbConnection();
 

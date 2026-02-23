@@ -3,11 +3,11 @@ import { sql } from "drizzle-orm";
 
 export const checkDatabaseHealth = async () => {
   try {
-    const result = await database.execute(sql`SELECT NOW()`);
-    console.log(`[Health]: Tested DB health succesfully at: ${result[0].now}`);
+    await database.execute(sql`SELECT NOW()`);
+    return true
   } catch (error) {
     console.error("[Health]: DB unhealthy!");
     console.error(error);
-    process.exit(1); 
+    return false
   }
 };

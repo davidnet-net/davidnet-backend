@@ -1,8 +1,46 @@
-import { checkDatabaseHealth } from "./db_check";
+import { checkDatabaseHealth } from "./database";
+
+interface healthReportType {
+    services: {
+        database: boolean;
+    }
+    isHealthy: boolean;
+    date: Date;
+}
+export let healthReport: healthReportType = {
+    services: {
+        database: false
+    },
+    isHealthy: false,
+    date: new Date()
+}
+
+// Health Report schedular
+let healthTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function setupNextHealthBeat() {
+    if (healthTimer) clearTimeout(healthTimer);
+
+    healthTimer = setTimeout(healthBeat, 10000)
+}
+
+export function stopHealthBeat() {
+    if (healthTimer) {
+        clearTimeout(healthTimer);
+    }
+    healthTimer = null; 
+}
 
 /**
- * Runs all health checks
+ * Updates the health report. And schedules an new healthBeat after.
  */
-export async function healthCheck() {
-    await checkDatabaseHealth();
+async function healthBeat() {
+    const databaseHealthy = await checkDatabaseHealth();
+    healthReport.services.database = databaseHealthy;
+
+    healthReport.date = new Date();
+    healthReport.isHealthy = databaseHealthy; // && other check
+
+    if (healthTimer === null) return;
+    setupNextHealthBeat();
 }

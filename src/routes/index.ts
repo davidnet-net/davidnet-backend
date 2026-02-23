@@ -1,7 +1,6 @@
-import app from ".."
+import { Hono } from "hono"
+import { health } from "./health"
 
-export async function registerRoutes() {
-    app.get('/', (c) => {
-        return c.text('Hello Hono!')
-    })
+export async function registerRoutes(app: Hono) {
+    app.route('/health', health)
 }
