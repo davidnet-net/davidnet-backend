@@ -1,0 +1,59 @@
+name: Deploy SRV
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_SRV_HOST }}
+          username: ${{ secrets.DEPLOY_SRV_USER }}
+          key: ${{ secrets.DEPLOY_SRV_KEY }}
+          script: |
+            set -e
+
+            REPO_NAME=$(basename "${{ github.repository }}")
+            DEPLOY_PATH="/srv/$REPO_NAME"
+
+            echo "Deployment path: $DEPLOY_PATH"
+            git config --global --add safe.directory $DEPLOY_PATH
+
+            # If folder does not exist, clone the repo
+            if [ ! -d "$DEPLOY_PATH" ]; then
+              echo "Folder does not exist, cloning repo..."
+              git clone -b main https://github.com/${{ github.repository }}.git "$DEPLOY_PATH"
+            fi
+
+            cd "$DEPLOY_PATH"
+
+            if [ -d ".git" ]; then
+              echo "Repo exists, fetching latest changes..."
+              git fetch --all
+              git reset --hard origin/main
+            else
+              echo "No Git repo found, initializing..."
+              git init
+              git remote add origin https://github.com/${{ github.repository }}.git
+              git fetch --all
+              git reset --hard origin/main
+            fi
+
+            echo "Building updated containers..."
+            docker compose build --pull --no-cache
+
+            bun install 
+            bun run db:migrate
+
+            echo "Recreating services..."
+            docker compose up -d --remove-orphans
+
+            echo "Deployment finished successfully!"

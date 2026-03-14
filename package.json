@@ -4,9 +4,9 @@
     "dev": "bun run --hot src/index.ts",
     "build": "bun build ./src/index.ts --target=bun --sourcemap --outdir ./dist",
     "docker:dev": "mkdir -p volumes && sudo chown -R 1000:1000 ./volumes && docker compose -f docker-compose.dev.yaml up --build && docker compose -f docker-compose.dev.yaml down",
-    "docker:reset": "rm -rf volumes",
-    "dbdev:push": "bun --bun drizzle-kit push --strict",
-    "dbdev:studio": "bun --bun drizzle-kit studio"
+    "db:migrate": "bun --bun drizzle-kit migrate",
+    "db:push": "bun --bun drizzle-kit push --strict",
+    "db:studio": "bun --bun drizzle-kit studio"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.1",

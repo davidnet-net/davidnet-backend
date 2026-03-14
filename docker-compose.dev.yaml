@@ -4,7 +4,7 @@ services:
     ports:
       - "3020:3020"
     environment:
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
     depends_on:
           postgres:
             condition: service_healthy
@@ -35,7 +35,7 @@ services:
     ports:
       - "8081:8081"
     environment:
-      - PGWEB_DATABASE_URL=${DATABASE_URL}?sslmode=disable
+      - PGWEB_DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}?sslmode=disable
     depends_on:
           postgres:
             condition: service_healthy

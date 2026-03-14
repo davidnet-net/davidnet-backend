@@ -1,9 +1,6 @@
 import { pgSchema, text, timestamp, uuid, boolean } from "drizzle-orm/pg-core";
 import { type InferSelectModel, type InferInsertModel } from "drizzle-orm";
 
-//! Make sure to keep schemaFilter up to date inside the drizzle config file!
-//! DO NOT PUT LOGIC INSIDE THIS FILE!
-
 export const authSchema = pgSchema("auth");
 
 // --- ENUMS ---
@@ -62,14 +59,14 @@ export const userTokens = authSchema.table("user_tokens", {
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });
 
-export type User = InferSelectModel<typeof users>;
-export type NewUser = InferInsertModel<typeof users>;
+export type user = InferSelectModel<typeof users>;
+export type newUser = InferInsertModel<typeof users>;
 
-export type UserPreferences = InferSelectModel<typeof userPreferences>;
-export type NewUserPreferences = InferInsertModel<typeof userPreferences>;
+export type userPreferences = InferSelectModel<typeof userPreferences>;
+export type newUserPreferences = InferInsertModel<typeof userPreferences>;
 
-export type UserPrivacyPreferences = InferSelectModel<typeof userPrivacyPreferences>;
-export type NewUserPrivacyPreferences = InferInsertModel<typeof userPrivacyPreferences>;
+export type userPrivacyPreferences = InferSelectModel<typeof userPrivacyPreferences>;
+export type newUserPrivacyPreferences = InferInsertModel<typeof userPrivacyPreferences>;
 
-export type UserToken = InferSelectModel<typeof userTokens>;
-export type NewUserToken = InferInsertModel<typeof userTokens>;
+export type userToken = InferSelectModel<typeof userTokens>;
+export type newUserToken = InferInsertModel<typeof userTokens>;
