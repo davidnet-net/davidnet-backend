@@ -6,7 +6,8 @@
     "docker:dev": "mkdir -p volumes && sudo chown -R 1000:1000 ./volumes && docker compose -f docker-compose.dev.yaml up --build && docker compose -f docker-compose.dev.yaml down",
     "db:migrate": "bun --bun drizzle-kit migrate",
     "db:push": "bun --bun drizzle-kit push --strict",
-    "db:studio": "bun --bun drizzle-kit studio"
+    "db:studio": "bun --bun drizzle-kit studio",
+    "db:generate": "bun --bun drizzle-kit generate && echo 'TODO ADD THIS TO AN PRE-COMMIT HOOK'"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.1",
