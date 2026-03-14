@@ -20,7 +20,8 @@ jobs:
           key: ${{ secrets.DEPLOY_SRV_KEY }}
           script: |
             set -e
-
+            npm install -g bun
+            
             REPO_NAME=$(basename "${{ github.repository }}")
             DEPLOY_PATH="/srv/$REPO_NAME"
 
