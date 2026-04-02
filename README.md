@@ -1,3 +1,5 @@
+# The best backend ever (:
+
 To install dependencies:
 ```sh
 bun install

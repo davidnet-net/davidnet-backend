@@ -50,7 +50,9 @@ jobs:
             echo "Building updated containers..."
             docker compose build --pull --no-cache
 
-            bun install 
+            bun install
+
+            # Maybe shutdown the api itself here (BUT NOT THE DB!!!)
             bun run db:migrate
 
             echo "Recreating services..."
