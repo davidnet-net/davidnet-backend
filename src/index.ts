@@ -16,6 +16,7 @@ async function init() {
   console.log("[Init]: Registering routes.")
   await registerRoutes(app);
 
+  console.log("[Init]: Starting server.")
   server = Bun.serve({
     fetch: app.fetch,
     port: 3020,
