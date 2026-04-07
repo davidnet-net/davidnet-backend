@@ -1,0 +1,14 @@
+{
+	"recommendations": [
+		"inlang.vs-code-extension",
+		"esbenp.prettier-vscode",
+		"aaron-bond.better-comments",
+		"YoavBls.pretty-ts-errors",
+		"svelte.svelte-vscode",
+		"pivaszbs.svelte-autoimport",
+		"ms-playwright.playwright",
+		"saeris.markdown-github-alerts",
+		"bierner.markdown-preview-github-styles",
+		"SimonSiefke.svg-preview"
+	]
+}

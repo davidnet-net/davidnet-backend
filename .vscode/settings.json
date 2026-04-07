@@ -1,0 +1,21 @@
+{
+	"editor.defaultFormatter": "esbenp.prettier-vscode",
+	"editor.codeActionsOnSave": {
+		"source.fixAll.prettier": "explicit",
+		"source.fixAll.eslint": "explicit"
+	},
+	"files.exclude": {
+		"**/node_modules": true,
+		"**/dist": true,
+		"**/build": true,
+		"**/.svelte-kit": true,
+		"**/test-results": true
+	},
+	"search.exclude": {
+		"**/node_modules": true,
+		"**/dist": true,
+		"**/build": true,
+		"**/.svelte-kit": true,
+		"**/test-results": true
+	}
+}

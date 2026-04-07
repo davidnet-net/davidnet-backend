@@ -1,5 +1,6 @@
 services:
   davidnet-api:
+    container_name: davidnet_backend
     build: .
     ports:
       - "3020:3020"
@@ -12,6 +13,7 @@ services:
       - davidnet_internal
 
   postgres:
+    container_name: davidnet_database
     image: postgres:18
     environment:
       POSTGRES_USER: ${DB_USER}
@@ -32,6 +34,7 @@ services:
 
   pgweb:
     image: sosedoff/pgweb
+    container_name: davidnet_pgweb
     ports:
       - "8081:8081"
     environment:
