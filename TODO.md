@@ -1,0 +1,3 @@
+- Rate limiting
+  -One day the search title might be in a <h3> tag, and the next week they might change it to a <span> with a random class name like .rQ61m. Logs
+- Add to LLM files ArkType for validation

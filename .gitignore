@@ -7,3 +7,6 @@ dist/
 
 # Volumes
 volumes/
+
+# Etc
+./src/core/constants/domains.txt
