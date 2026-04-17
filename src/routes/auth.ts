@@ -10,7 +10,7 @@ auth.post("/signup", sValidator("json", signupSchema), async (c) => {
 
 	const email = data.email;
 	if (!(await isValidEmail(email))) {
-		return c.json({ success: "false", code: "", message: "" }, 400);
+		return c.json({ success: "false", code: "INVALID_EMAIL", message: "" }, 400);
 	}
 
 	const username = data.username.toLowerCase();
