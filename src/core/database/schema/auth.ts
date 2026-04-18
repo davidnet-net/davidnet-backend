@@ -18,7 +18,7 @@ export const visibilityEnum = authSchema.enum("visibility_type", [
 export const users = authSchema.table("users", {
 	userId: uuid("user_id")
 		.primaryKey()
-		.default(sql`make_uuidv7()`),
+		.default(sql`uuidv7()`),
 	username: text("username").notNull().unique(),
 	password: text("password").notNull(),
 	displayName: text("display_name").notNull(),
@@ -58,7 +58,7 @@ export const userPrivacyPreferences = authSchema.table("user_privacy_preferences
 export const userTokens = authSchema.table("user_tokens", {
 	jwtId: uuid("jwt_id")
 		.primaryKey()
-		.default(sql`make_uuidv7()`),
+		.default(sql`uuidv7()`),
 	userId: uuid("user_id")
 		.notNull()
 		.references(() => users.userId, { onDelete: "cascade" }),

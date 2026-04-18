@@ -47,12 +47,16 @@ jobs:
               git reset --hard origin/main
             fi
 
+            # Set environment variable to use the production compose file
+            export COMPOSE_FILE=docker-compose.prod.yaml
+
             echo "Building updated containers..."
             docker compose build --pull --no-cache
 
+            # Assuming your bun setup is already available on the server
             bun install
 
-            # Maybe shutdown the api itself here (BUT NOT THE DB!!!)
+            # Run migrations before bringing services up
             bun run db:migrate
 
             echo "Recreating services..."

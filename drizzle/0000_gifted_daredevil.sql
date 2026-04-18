@@ -20,15 +20,16 @@ CREATE TABLE "auth"."user_privacy_preferences" (
 );
 --> statement-breakpoint
 CREATE TABLE "auth"."user_tokens" (
-	"jwt_id" uuid PRIMARY KEY NOT NULL,
+	"jwt_id" uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
 	"user_id" uuid NOT NULL,
 	"issued_at" timestamp with time zone NOT NULL,
 	"expires_at" timestamp with time zone NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "auth"."users" (
-	"user_id" uuid PRIMARY KEY NOT NULL,
+	"user_id" uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
 	"username" text NOT NULL,
+	"password" text NOT NULL,
 	"display_name" text NOT NULL,
 	"avatar_url" text,
 	"banner_url" text,
