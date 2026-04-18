@@ -4,8 +4,8 @@ import { Hono } from "hono";
 
 import { closeDbConnection } from "./core/database/client";
 import { setupNextHealthBeat, stopHealthBeat } from "./core/health/health";
-import { registerRoutes } from "./routes";
 import { registerMiddlewares } from "./middlewares";
+import { registerRoutes } from "./routes";
 
 const app = new Hono();
 let server: Bun.Server<undefined> | undefined = undefined;

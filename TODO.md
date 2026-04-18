@@ -1,3 +1,4 @@
 - Rate limiting
   -One day the search title might be in a <h3> tag, and the next week they might change it to a <span> with a random class name like .rQ61m. Logs
 - Add to LLM files ArkType for validation
+- Link user to ORG when email usage is part of @domainoforg.com (Verify domain ownership with DNS)

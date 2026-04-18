@@ -1,7 +1,17 @@
 const url =
 	"https://raw.githubusercontent.com/doodad-labs/disposable-email-domains/main/data/domains.txt";
+const filePath = "src/core/constants/domains.txt";
 
 const updateList = async () => {
+	// Check if file exists
+	const file = Bun.file(filePath);
+	const exists = await file.exists();
+
+	if (exists) {
+		console.log("File already exists. Skipping update.");
+		return;
+	}
+
 	console.log("Updating disposable email list...");
 	const response = await fetch(url);
 	const text = await response.text();
@@ -15,8 +25,8 @@ const updateList = async () => {
 	// Join back into a simple newline-separated string
 	const content = domains.join("\n");
 
-	// Write to a pure .txt file instead of .ts
-	await Bun.write("src/core/constants/domains.txt", content);
+	// Write to file
+	await Bun.write(filePath, content);
 	console.log(`Finished! Processed ${domains.length} domains to domains.txt.`);
 };
 

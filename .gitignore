@@ -9,4 +9,4 @@ dist/
 volumes/
 
 # Etc
-#src/core/constants/domains.txt
+src/core/constants/domains.txt

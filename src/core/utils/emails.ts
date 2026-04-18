@@ -1,7 +1,13 @@
 import { resolveMx } from "node:dns/promises";
+import { join } from "node:path";
 
 // Correctly load the raw text file using Bun's API and create the Set in memory
-const domainsFile = Bun.file(import.meta.dir + "/../constants/domains.txt");
+const DOMAINS_PATH =
+	process.env.NODE_ENV === "production"
+		? join(process.cwd(), "constants/domains.txt")
+		: join(process.cwd(), "src/core/constants/domains.txt");
+
+const domainsFile = Bun.file(DOMAINS_PATH);
 const domainsText = await domainsFile.text();
 const EMAILBLACKLIST = new Set(domainsText.split("\n").filter(Boolean));
 
@@ -44,7 +50,7 @@ const hasValidMailServer = async (email: string): Promise<boolean> => {
 
 		const records = await Promise.race([dnsLookup, timeout]);
 		return records.length > 0;
-	} catch (error) {
+	} catch {
 		/**
 		 * Catches:
 		 * - The domain doesn't exist (ENOTFOUND)
@@ -59,16 +65,16 @@ const hasValidMailServer = async (email: string): Promise<boolean> => {
  * @param email
  * @returns Promise<boolean> - True = Pass
  */
-export const isValidEmail = async (email: string): Promise<boolean> => {
+export const isInvalidEmail = async (email: string): Promise<string | boolean> => {
 	// Regex check
-	if (!isValidEmailRegex(email)) return false;
+	if (!isValidEmailRegex(email)) return "EMAIL_REGEX";
 
 	// Blacklist check
-	if (isEmailBlacklisted(email)) return false;
+	if (isEmailBlacklisted(email)) return "EMAIL_BLACKLIST";
 
 	// Mail server check
 	const isMailServerReal = await hasValidMailServer(email);
-	if (!isMailServerReal) return false;
+	if (!isMailServerReal) return "EMAIL_DNS";
 
-	return true;
+	return false;
 };

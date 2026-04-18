@@ -8,6 +8,13 @@
 			"when": 1773519898331,
 			"tag": "0000_cynical_metal_master",
 			"breakpoints": true
+		},
+		{
+			"idx": 1,
+			"version": "7",
+			"when": 1776456278510,
+			"tag": "0001_old_legion",
+			"breakpoints": true
 		}
 	]
 }
