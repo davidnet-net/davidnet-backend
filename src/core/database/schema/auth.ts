@@ -34,6 +34,21 @@ export const users = authSchema.table("users", {
 	updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
 });
 
+export const signupStatus = authSchema.table("signup_status", {
+	userId: uuid("user_id")
+		.primaryKey()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	emailVerified: boolean("email_verified").default(false).notNull(),
+	emailVerificationToken: uuid("email_verification_token")
+		.default(sql`uuidv4()`)
+		.notNull(),
+	privacyStepCompleted: boolean("privacy_step_completed").default(false).notNull(),
+	preferencesStepCompleted: boolean("preferences_step_completed").default(false).notNull(),
+	signupToken: uuid("signup_token")
+		.default(sql`uuidv4()`)
+		.notNull()
+});
+
 export const userPreferences = authSchema.table("user_preferences", {
 	userId: uuid("user_id")
 		.primaryKey()

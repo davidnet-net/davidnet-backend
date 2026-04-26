@@ -8,6 +8,13 @@
       "when": 1776530376494,
       "tag": "0000_gifted_daredevil",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1776895809564,
+      "tag": "0001_closed_rattler",
+      "breakpoints": true
     }
   ]
 }

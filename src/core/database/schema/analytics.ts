@@ -1,4 +1,4 @@
-import { type InferInsertModel, type InferSelectModel } from "drizzle-orm";
+import { sql, type InferInsertModel, type InferSelectModel } from "drizzle-orm";
 import { jsonb, pgSchema, uuid } from "drizzle-orm/pg-core";
 
 export const analyticsSchema = pgSchema("analytics");
@@ -7,7 +7,9 @@ export const analyticsSchema = pgSchema("analytics");
 
 // --- TABLES ---
 export const feedback = analyticsSchema.table("feedback", {
-	feedbackId: uuid("feedback_id").primaryKey(), // Expects UUIDv7
+	feedbackId: uuid("feedback_id")
+		.primaryKey()
+		.default(sql`uuidv7()`),
 	userId: uuid("user_id").notNull(),
 	data: jsonb("data").notNull()
 });
