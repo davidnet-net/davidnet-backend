@@ -5,8 +5,8 @@
 		"dev": "bun run meta/scripts/setup.ts && bun run --hot src/index.ts",
 		"build": "bun run meta/scripts/setup.ts && bun build ./src/index.ts --target=bun --sourcemap --outdir ./dist",
 		"docker:dev": "mkdir -p volumes && sudo chown -R 1000:1000 ./volumes && docker compose -f docker-compose.dev.yaml up --build && docker compose -f docker-compose.dev.yaml down",
-		"db:migrate": "bun --bun drizzle-kit migrate && echo 'Ran by the github workflow'",
-		"db:generate": "bun --bun drizzle-kit generate && echo 'Ran by precommit hook'",
+		"db:migrate": "bun --bun drizzle-kit migrate",
+		"db:generate": "bun --bun drizzle-kit generate",
 		"fmt": "bun x prettier --write . '!./volumes' && bun x eslint . --fix",
 		"lint": "bun x prettier --check . '!./volumes' && bun x eslint ."
 	},

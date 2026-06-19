@@ -3,7 +3,11 @@ import { Hono } from "hono";
 import { eq, or } from "drizzle-orm";
 import { database } from "../../core/database/client";
 import { signupStatus, users } from "../../core/database/schema/schema";
-import { changeSignupEmailSchema, signupSchema } from "../../core/requestSchemas/auth";
+import {
+	changeSignupEmailSchema,
+	signupSchema,
+	verifyEmailSchema
+} from "../../core/requestSchemas/auth";
 import { isInvalidEmail } from "../../core/utils/emails";
 import { sValidator } from "@hono/standard-validator";
 import { isValidUuidV4 } from "../../core/utils/uuidvalidator";
@@ -236,6 +240,87 @@ signup.post("/resend-email", createRateLimiter(3, 15 * 60 * 1000), async (c) => 
 		{
 			success: true,
 			code: "EMAIL_RESEND"
+		},
+		200
+	);
+});
+
+signup.post(
+	"/verify-email",
+	sValidator("json", verifyEmailSchema),
+	createRateLimiter(15, 15 * 60 * 1000),
+	async (c) => {
+		const data = c.req.valid("json");
+		const emailVerificationToken = data.emailVerificationToken;
+
+		if (!isValidUuidV4(emailVerificationToken)) {
+			return c.json({ success: false, code: "EMAIL_VERIFICATION_TOKEN_INVALID" }, 400);
+		}
+
+		const existingSignupStatus = await database
+			.select({
+				userID: signupStatus.userId,
+				emailVerificationToken: signupStatus.emailVerificationToken
+			})
+			.from(signupStatus)
+			.where(eq(signupStatus.emailVerificationToken, emailVerificationToken as string))
+			.limit(1);
+
+		if (existingSignupStatus.length === 0) {
+			return c.json({ success: false, code: "EMAIL_VERIFICATION_TOKEN_INVALID" }, 400);
+		}
+
+		await database
+			.update(signupStatus)
+			.set({
+				emailVerified: true
+			})
+			.where(eq(signupStatus.emailVerificationToken, emailVerificationToken as string));
+
+		return c.json(
+			{
+				success: true,
+				code: "EMAIL_VERIFIED"
+			},
+			200
+		);
+	}
+);
+
+signup.get("/email-verified", async (c) => {
+	const signupToken = c.req.header("X-SignupToken");
+
+	const userId = await isValidSignupToken(signupToken);
+	if (!userId) {
+		return c.json({ success: false, code: "SIGNUPTOKEN_INVALID" }, 401);
+	}
+
+	const [status] = await database
+		.select({
+			emailVerified: signupStatus.emailVerified
+		})
+		.from(signupStatus)
+		.where(eq(signupStatus.userId, userId as string))
+		.limit(1);
+
+	if (!status) {
+		return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
+	}
+
+	if (!status.emailVerified) {
+		return c.json(
+			{
+				success: true,
+				code: "EMAIL_NOT_VERIFIED"
+			},
+			200
+		);
+	}
+
+	return c.json(
+		{
+			success: true,
+			code: "EMAIL_VERIFIED"
 		},
 		200
 	);

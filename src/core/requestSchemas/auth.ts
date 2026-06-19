@@ -10,3 +10,7 @@ export const signupSchema = type({
 export const changeSignupEmailSchema = type({
 	email: "string"
 });
+
+export const verifyEmailSchema = type({
+	emailVerificationToken: "string"
+});
