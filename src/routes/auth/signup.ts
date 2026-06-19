@@ -141,7 +141,7 @@ signup.post(
 
 signup.patch(
 	"/change-email",
-	createRateLimiter(3, 15 * 60 * 1000),
+	createRateLimiter(6, 15 * 60 * 1000),
 	sValidator("json", changeSignupEmailSchema),
 	async (c) => {
 		const signupToken = c.req.header("X-SignupToken");
