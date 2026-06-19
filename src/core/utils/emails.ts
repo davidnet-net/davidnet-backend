@@ -1,5 +1,6 @@
 import { resolveMx } from "node:dns/promises";
 import { join } from "node:path";
+import nodemailer from "nodemailer";
 
 // Correctly load the raw text file using Bun's API and create the Set in memory
 const DOMAINS_PATH =
@@ -78,3 +79,59 @@ export const isInvalidEmail = async (email: string): Promise<string | boolean> =
 
 	return false;
 };
+
+/**
+ * Send an email using Nodemailer (via SMTP).
+ *
+ * @param recipient - Email address of the recipient.
+ * @param subject - Subject line of the email.
+ * @param htmlContent - HTML content to include in the email body.
+ */
+export async function sendEmail(
+	recipient: string,
+	subject: string,
+	htmlContent: string
+): Promise<void> {
+	const emailSource = Bun.env.EMAIL;
+	const emailPassword = Bun.env.EMAIL_PASSWORD;
+
+	if (!emailSource || !emailPassword) {
+		throw new Error("Email credentials are not set in environment variables");
+	}
+
+	const transporter = nodemailer.createTransport({
+		host: "smtp.strato.com",
+		port: 465,
+		secure: true, // true for port 465, false for port 587
+		auth: {
+			user: emailSource,
+			pass: emailPassword
+		}
+	});
+
+	await transporter.sendMail({
+		from: emailSource,
+		to: recipient,
+		subject,
+		html: htmlContent
+	});
+}
+
+/**
+ * Processes an HTML template string and replaces placeholders {{key}} with given values.
+ *
+ * @param templateContent - The raw HTML string.
+ * @param replacements - An object with keys and values to replace in the template.
+ * @returns The processed HTML string with replacements applied.
+ */
+export function loadEmailTemplate(
+	templateContent: string,
+	replacements: Record<string, string>
+): string {
+	let result = templateContent;
+	for (const [key, value] of Object.entries(replacements)) {
+		const regex = new RegExp(`{{${key}}}`, "g");
+		result = result.replace(regex, value);
+	}
+	return result;
+}

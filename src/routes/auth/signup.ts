@@ -303,10 +303,6 @@ signup.get("/email-verified", async (c) => {
 		.where(eq(signupStatus.userId, userId as string))
 		.limit(1);
 
-	if (!status) {
-		return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
-	}
-
 	if (!status.emailVerified) {
 		return c.json(
 			{

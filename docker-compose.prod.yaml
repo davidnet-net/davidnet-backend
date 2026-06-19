@@ -5,6 +5,9 @@ services:
       - "3020:3020"
     environment:
       - DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      - PROD=yea_this_is_prod!
+      - EMAIL=${EMAIL}
+      - EMAIL_PASSWORD=${EMAIL_PASSWORD}
     healthcheck:
       test:
         [
