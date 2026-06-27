@@ -1,19 +1,4 @@
 services:
-  davidnet-api:
-    container_name: davidnet_backend
-    build: .
-    ports:
-      - "3020:3020"
-    environment:
-      - DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
-      - EMAIL=${EMAIL}
-      - EMAIL_PASSWORD=${EMAIL_PASSWORD}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - davidnet_internal
-
   postgres:
     container_name: davidnet_database
     image: postgres:18

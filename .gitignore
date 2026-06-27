@@ -10,3 +10,6 @@ volumes/
 
 # Etc
 src/core/constants/domains.txt
+
+.envrc
+.direnv
