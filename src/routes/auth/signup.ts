@@ -2,9 +2,10 @@ import { Hono } from "hono";
 
 import { eq, or } from "drizzle-orm";
 import { database } from "../../core/database/client";
-import { signupStatus, users } from "../../core/database/schema/schema";
+import { signupStatus, userPrivacyPreferences, users } from "../../core/database/schema/schema";
 import {
 	changeSignupEmailSchema,
+	onboardingPrivacySchema,
 	signupSchema,
 	verifyEmailSchema
 } from "../../core/requestSchemas/auth";
@@ -321,3 +322,73 @@ signup.get("/email-verified", async (c) => {
 		200
 	);
 });
+signup.post(
+	"/privacy-step",
+	createRateLimiter(5, 15 * 60 * 1000), // Protect against token automated guessing/abuse
+	sValidator("json", onboardingPrivacySchema),
+	async (c) => {
+		const signupToken = c.req.header("X-SignupToken");
+
+		// Validate access using your token-level onboarding validator
+		const userId = await isValidSignupToken(signupToken);
+		if (!userId) {
+			return c.json({ success: false, code: "SIGNUPTOKEN_INVALID" }, 401);
+		}
+
+		const data = c.req.valid("json");
+
+		// Fetch step history status to ensure this endpoint can only be run once
+		const [status] = await database
+			.select({
+				privacyStepCompleted: signupStatus.privacyStepCompleted
+			})
+			.from(signupStatus)
+			.where(eq(signupStatus.userId, userId as string))
+			.limit(1);
+
+		if (!status) {
+			return c.json({ success: false, code: "SIGNUP_STATUS_NOT_FOUND" }, 404);
+		}
+
+		if (status.privacyStepCompleted) {
+			return c.json({ success: false, code: "PRIVACY_STEP_ALREADY_COMPLETED" }, 400);
+		}
+
+		// Perform an atomic database transaction to update preferences and transition steps safely
+		await database.transaction(async (tx) => {
+			await tx
+				.insert(userPrivacyPreferences)
+				.values({
+					userId: userId as string,
+					languageVisibility: data.languageVisibility,
+					timezoneVisibility: data.timezoneVisibility,
+					locationVisibility: data.locationVisibility,
+					emailVisibility: data.emailVisibility
+				})
+				.onConflictDoUpdate({
+					target: userPrivacyPreferences.userId,
+					set: {
+						languageVisibility: data.languageVisibility,
+						timezoneVisibility: data.timezoneVisibility,
+						locationVisibility: data.locationVisibility,
+						emailVisibility: data.emailVisibility
+					}
+				});
+
+			await tx
+				.update(signupStatus)
+				.set({
+					privacyStepCompleted: true
+				})
+				.where(eq(signupStatus.userId, userId as string));
+		});
+
+		return c.json(
+			{
+				success: true,
+				code: "PRIVACY_STEP_COMPLETED"
+			},
+			200
+		);
+	}
+);
