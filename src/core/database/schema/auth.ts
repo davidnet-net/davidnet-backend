@@ -42,7 +42,6 @@ export const signupStatus = authSchema.table("signup_status", {
 	emailVerificationToken: uuid("email_verification_token")
 		.default(sql`uuidv4()`)
 		.notNull(),
-	privacyStepCompleted: boolean("privacy_step_completed").default(false).notNull(),
 	preferencesStepCompleted: boolean("preferences_step_completed").default(false).notNull(),
 	signupToken: uuid("signup_token")
 		.default(sql`uuidv4()`)

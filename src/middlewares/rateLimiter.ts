@@ -1,9 +1,8 @@
 import type { MiddlewareHandler } from "hono";
 
-// Local store: Map<IP, { count: number, resetTime: number }>
-const store = new Map<string, { count: number; resetTime: number }>();
-
 export const createRateLimiter = (limit: number, windowMs: number): MiddlewareHandler => {
+	const store = new Map<string, { count: number; resetTime: number }>();
+
 	return async (c, next) => {
 		const ip = c.req.header("x-forwarded-for") || "anonymous";
 		const now = Date.now();

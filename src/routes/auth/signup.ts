@@ -2,9 +2,10 @@ import { Hono } from "hono";
 
 import { eq, or } from "drizzle-orm";
 import { database } from "../../core/database/client";
-import { signupStatus, users } from "../../core/database/schema/schema";
+import { signupStatus, userPreferences, users } from "../../core/database/schema/schema";
 import {
 	changeSignupEmailSchema,
+	initialPreferencesSchema,
 	signupSchema,
 	verifyEmailSchema
 } from "../../core/requestSchemas/auth";
@@ -321,3 +322,59 @@ signup.get("/email-verified", async (c) => {
 		200
 	);
 });
+
+signup.post(
+	"/preferences",
+	createRateLimiter(5, 15 * 60 * 1000),
+	sValidator("json", initialPreferencesSchema),
+	async (c) => {
+		const signupToken = c.req.header("X-SignupToken");
+
+		// 1. Validate the signup token
+		const userId = await isValidSignupToken(signupToken);
+		if (!userId) {
+			return c.json({ success: false, code: "SIGNUPTOKEN_INVALID" }, 401);
+		}
+
+		const data = c.req.valid("json");
+
+		// 2. Insert or Update Preferences (Upsert prevents errors on double-submissions)
+		await database
+			.insert(userPreferences)
+			.values({
+				userId: userId as string,
+				theme: data.theme as "system" | "dark" | "light" | "contrast",
+				language: data.language,
+				timezone: data.timezone,
+				firstDayOfWeek: data.firstDayOfWeek,
+				dateFormat: data.dateFormat
+			})
+			.onConflictDoUpdate({
+				target: userPreferences.userId,
+				set: {
+					theme: data.theme as "system" | "dark" | "light" | "contrast",
+					language: data.language,
+					timezone: data.timezone,
+					firstDayOfWeek: data.firstDayOfWeek,
+					dateFormat: data.dateFormat
+				}
+			});
+
+		// 3. Mark the preferences step as completed in signup_status
+		await database
+			.update(signupStatus)
+			.set({
+				preferencesStepCompleted: true
+			})
+			.where(eq(signupStatus.userId, userId as string));
+
+		// 4. Return success
+		return c.json(
+			{
+				success: true,
+				code: "PREFERENCES_SAVED"
+			},
+			200
+		);
+	}
+);
