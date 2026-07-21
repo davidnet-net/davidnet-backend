@@ -1,6 +1,4 @@
 import { type } from "arktype";
-const visibilityType =
-	"'private'|'organizations'|'connections'|'organizations_and_connections'|'public'";
 
 export const signupSchema = type({
 	email: "string",

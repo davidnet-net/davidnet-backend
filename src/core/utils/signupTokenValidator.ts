@@ -1,7 +1,8 @@
+import { eq } from "drizzle-orm";
+
 import { database } from "../database/client";
 import { signupStatus } from "../database/schema/auth";
 import { isValidUuidV4 } from "./uuidvalidator";
-import { eq, or, sql } from "drizzle-orm";
 
 /**
  *

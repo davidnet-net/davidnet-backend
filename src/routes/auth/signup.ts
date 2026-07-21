@@ -1,6 +1,7 @@
+import { sValidator } from "@hono/standard-validator";
+import { eq, or } from "drizzle-orm";
 import { Hono } from "hono";
 
-import { eq, or } from "drizzle-orm";
 import { database } from "../../core/database/client";
 import { signupStatus, userPreferences, users } from "../../core/database/schema/schema";
 import {
@@ -8,12 +9,12 @@ import {
 	initialPreferencesSchema,
 	signupSchema,
 	verifyEmailSchema
-} from "../../core/requestSchemas/auth";
-import { isInvalidEmail } from "../../core/utils/emails";
-import { sValidator } from "@hono/standard-validator";
-import { isValidUuidV4 } from "../../core/utils/uuidvalidator";
-import { isValidSignupToken } from "../../core/utils/signupTokenValidator";
+} from "../../core/requestSchemas/signup";
+import { createUserAuditLog } from "../../core/shared/auditLogs";
 import { sendSignupVerifyEmail } from "../../core/shared/signupVerifyEmail";
+import { isInvalidEmail } from "../../core/utils/emails";
+import { isValidSignupToken } from "../../core/utils/signupTokenValidator";
+import { isValidUuidV4 } from "../../core/utils/uuidvalidator";
 import { createRateLimiter } from "../../middlewares/rateLimiter";
 
 export const signup = new Hono();
@@ -127,6 +128,8 @@ signup.post(
 
 		// Send signup mail
 		sendSignupVerifyEmail(signupStatusInsertion[0].emailVerificationToken, userInsertion[0].email);
+
+		await createUserAuditLog(userInsertion[0].userID, "Account created.");
 
 		return c.json(
 			{
@@ -277,6 +280,17 @@ signup.post(
 				emailVerified: true
 			})
 			.where(eq(signupStatus.emailVerificationToken, emailVerificationToken as string));
+
+		const user = await database
+			.select({
+				userID: users.userId,
+				email: users.email
+			})
+			.from(users)
+			.where(eq(users.userId, existingSignupStatus[0].userID))
+			.limit(1);
+
+		await createUserAuditLog(user[0].userID, "Initial email (" + user[0].email + ") verified.");
 
 		return c.json(
 			{

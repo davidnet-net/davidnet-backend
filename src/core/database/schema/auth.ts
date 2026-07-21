@@ -69,7 +69,7 @@ export const userPrivacyPreferences = authSchema.table("user_privacy_preferences
 	emailVisibility: visibilityEnum("email_visibility").default("private").notNull()
 });
 
-export const userTokens = authSchema.table("user_tokens", {
+export const sessionTokens = authSchema.table("session_tokens", {
 	jwtId: uuid("jwt_id")
 		.primaryKey()
 		.default(sql`uuidv7()`),
@@ -78,6 +78,17 @@ export const userTokens = authSchema.table("user_tokens", {
 		.references(() => users.userId, { onDelete: "cascade" }),
 	issuedAt: timestamp("issued_at", { withTimezone: true }).notNull(),
 	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
+});
+
+export const auditLogs = authSchema.table("audit_logs", {
+	id: uuid("id")
+		.primaryKey()
+		.default(sql`uuidv7()`),
+	userId: uuid("user_id")
+		.notNull()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	message: text("message").notNull()
 });
 
 export type user = InferSelectModel<typeof users>;
@@ -89,5 +100,8 @@ export type newUserPreferences = InferInsertModel<typeof userPreferences>;
 export type userPrivacyPreferences = InferSelectModel<typeof userPrivacyPreferences>;
 export type newUserPrivacyPreferences = InferInsertModel<typeof userPrivacyPreferences>;
 
-export type userToken = InferSelectModel<typeof userTokens>;
-export type newUserToken = InferInsertModel<typeof userTokens>;
+export type userToken = InferSelectModel<typeof sessionTokens>;
+export type newUserToken = InferInsertModel<typeof sessionTokens>;
+
+export type auditLog = InferSelectModel<typeof auditLogs>;
+export type newAuditLog = InferInsertModel<typeof auditLogs>;

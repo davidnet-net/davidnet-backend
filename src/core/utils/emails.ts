@@ -1,5 +1,6 @@
 import { resolveMx } from "node:dns/promises";
 import { join } from "node:path";
+
 import nodemailer from "nodemailer";
 
 // Correctly load the raw text file using Bun's API and create the Set in memory

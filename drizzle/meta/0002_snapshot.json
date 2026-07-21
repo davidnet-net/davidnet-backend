@@ -1,9 +1,166 @@
 {
-	"id": "3d1af0e4-cb28-4566-b427-5024a10e0a60",
-	"prevId": "00000000-0000-0000-0000-000000000000",
+	"id": "2b61f751-10ca-47d8-b629-166250d050c9",
+	"prevId": "9e5a6049-793c-4e0d-96bd-3160eb128af8",
 	"version": "7",
 	"dialect": "postgresql",
 	"tables": {
+		"auth.audit_logs": {
+			"name": "audit_logs",
+			"schema": "auth",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "uuid",
+					"primaryKey": true,
+					"notNull": true,
+					"default": "uuidv7()"
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "uuid",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"created_at": {
+					"name": "created_at",
+					"type": "timestamp with time zone",
+					"primaryKey": false,
+					"notNull": true,
+					"default": "now()"
+				},
+				"message": {
+					"name": "message",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {
+				"audit_logs_user_id_users_user_id_fk": {
+					"name": "audit_logs_user_id_users_user_id_fk",
+					"tableFrom": "audit_logs",
+					"tableTo": "users",
+					"schemaTo": "auth",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["user_id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"auth.session_tokens": {
+			"name": "session_tokens",
+			"schema": "auth",
+			"columns": {
+				"jwt_id": {
+					"name": "jwt_id",
+					"type": "uuid",
+					"primaryKey": true,
+					"notNull": true,
+					"default": "uuidv7()"
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "uuid",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"issued_at": {
+					"name": "issued_at",
+					"type": "timestamp with time zone",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"expires_at": {
+					"name": "expires_at",
+					"type": "timestamp with time zone",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {
+				"session_tokens_user_id_users_user_id_fk": {
+					"name": "session_tokens_user_id_users_user_id_fk",
+					"tableFrom": "session_tokens",
+					"tableTo": "users",
+					"schemaTo": "auth",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["user_id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"auth.signup_status": {
+			"name": "signup_status",
+			"schema": "auth",
+			"columns": {
+				"user_id": {
+					"name": "user_id",
+					"type": "uuid",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"email_verified": {
+					"name": "email_verified",
+					"type": "boolean",
+					"primaryKey": false,
+					"notNull": true,
+					"default": false
+				},
+				"email_verification_token": {
+					"name": "email_verification_token",
+					"type": "uuid",
+					"primaryKey": false,
+					"notNull": true,
+					"default": "uuidv4()"
+				},
+				"preferences_step_completed": {
+					"name": "preferences_step_completed",
+					"type": "boolean",
+					"primaryKey": false,
+					"notNull": true,
+					"default": false
+				},
+				"signup_token": {
+					"name": "signup_token",
+					"type": "uuid",
+					"primaryKey": false,
+					"notNull": true,
+					"default": "uuidv4()"
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {
+				"signup_status_user_id_users_user_id_fk": {
+					"name": "signup_status_user_id_users_user_id_fk",
+					"tableFrom": "signup_status",
+					"tableTo": "users",
+					"schemaTo": "auth",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["user_id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
 		"auth.user_preferences": {
 			"name": "user_preferences",
 			"schema": "auth",
@@ -118,55 +275,6 @@
 				"user_privacy_preferences_user_id_users_user_id_fk": {
 					"name": "user_privacy_preferences_user_id_users_user_id_fk",
 					"tableFrom": "user_privacy_preferences",
-					"tableTo": "users",
-					"schemaTo": "auth",
-					"columnsFrom": ["user_id"],
-					"columnsTo": ["user_id"],
-					"onDelete": "cascade",
-					"onUpdate": "no action"
-				}
-			},
-			"compositePrimaryKeys": {},
-			"uniqueConstraints": {},
-			"policies": {},
-			"checkConstraints": {},
-			"isRLSEnabled": false
-		},
-		"auth.user_tokens": {
-			"name": "user_tokens",
-			"schema": "auth",
-			"columns": {
-				"jwt_id": {
-					"name": "jwt_id",
-					"type": "uuid",
-					"primaryKey": true,
-					"notNull": true,
-					"default": "uuidv7()"
-				},
-				"user_id": {
-					"name": "user_id",
-					"type": "uuid",
-					"primaryKey": false,
-					"notNull": true
-				},
-				"issued_at": {
-					"name": "issued_at",
-					"type": "timestamp with time zone",
-					"primaryKey": false,
-					"notNull": true
-				},
-				"expires_at": {
-					"name": "expires_at",
-					"type": "timestamp with time zone",
-					"primaryKey": false,
-					"notNull": true
-				}
-			},
-			"indexes": {},
-			"foreignKeys": {
-				"user_tokens_user_id_users_user_id_fk": {
-					"name": "user_tokens_user_id_users_user_id_fk",
-					"tableFrom": "user_tokens",
 					"tableTo": "users",
 					"schemaTo": "auth",
 					"columnsFrom": ["user_id"],

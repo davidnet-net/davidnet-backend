@@ -13,6 +13,8 @@ let server: Bun.Server<undefined> | undefined = undefined;
 async function init() {
 	console.log("[Init]: Starting backend.");
 
+	// TODO Check ENV variables
+
 	console.log("[Init]: Starting healthBeat.");
 	setupNextHealthBeat();
 

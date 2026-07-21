@@ -34,7 +34,7 @@
 			"eslint --fix"
 		],
 		"src/core/database/schema/**": [
-			"bun run db:generate"
+			"echo 'Dont forget to run: bun run db:generate'. Not automated anymore due interactiveness"
 		]
 	},
 	"devDependencies": {

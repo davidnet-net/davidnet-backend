@@ -1,5 +1,5 @@
-import { sendEmail } from "../utils/emails";
 import { signupVerificationTemplate } from "../../emailTemplates/signupVerification";
+import { sendEmail } from "../utils/emails";
 
 export async function sendSignupVerifyEmail(emailVerificationToken: string, email: string) {
 	const verifyUrl =
