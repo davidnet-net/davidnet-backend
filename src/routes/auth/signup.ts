@@ -1,15 +1,22 @@
 import { sValidator } from "@hono/standard-validator";
 import { eq, or } from "drizzle-orm";
 import { Hono } from "hono";
+import { setCookie } from "hono/cookie";
 
 import { database } from "../../core/database/client";
-import { signupStatus, userPreferences, users } from "../../core/database/schema/schema";
+import {
+	signupStatus,
+	userPreferences,
+	userPrivacyPreferences,
+	users
+} from "../../core/database/schema/schema";
 import {
 	changeSignupEmailSchema,
 	initialPreferencesSchema,
 	signupSchema,
 	verifyEmailSchema
 } from "../../core/requestSchemas/signup";
+import { createUserSession } from "../../core/shared/jwt";
 import { createUserAuditLog } from "../../core/shared/auditLogs";
 import { sendSignupVerifyEmail } from "../../core/shared/signupVerifyEmail";
 import { isInvalidEmail } from "../../core/utils/emails";
@@ -32,7 +39,8 @@ signup.post(
 		}
 
 		// Username validation
-		const username = data.username.trim().toLowerCase();
+		const originalUsername = data.username.trim();
+		const username = originalUsername.toLowerCase();
 		if (!/^[a-z0-9_-]+$/.test(username)) {
 			return c.json({ success: false, code: "USERNAME_REGEX" }, 400);
 		}
@@ -111,8 +119,9 @@ signup.post(
 			.values({
 				username: username,
 				password: password,
+				avatarUrl: "http://localhost:5173/temp-profile-picture.png",
 				email: email,
-				displayName: username
+				displayName: originalUsername
 			})
 			.returning({ userID: users.userId, email: users.email });
 
@@ -125,6 +134,10 @@ signup.post(
 				signupToken: signupStatus.signupToken,
 				emailVerificationToken: signupStatus.emailVerificationToken
 			});
+
+		await database.insert(userPrivacyPreferences).values({
+			userId: userInsertion[0].userID
+		});
 
 		// Send signup mail
 		sendSignupVerifyEmail(signupStatusInsertion[0].emailVerificationToken, userInsertion[0].email);
@@ -392,3 +405,50 @@ signup.post(
 		);
 	}
 );
+
+signup.post("/finish", createRateLimiter(5, 15 * 60 * 1000), async (c) => {
+	const signupToken = c.req.header("X-SignupToken");
+
+	const userId = await isValidSignupToken(signupToken);
+	if (!userId) {
+		return c.json({ success: false, code: "SIGNUPTOKEN_INVALID" }, 401);
+	}
+
+	const [status] = await database
+		.select({
+			emailVerified: signupStatus.emailVerified,
+			preferencesStepCompleted: signupStatus.preferencesStepCompleted
+		})
+		.from(signupStatus)
+		.where(eq(signupStatus.userId, userId as string))
+		.limit(1);
+
+	if (!status.emailVerified || !status.preferencesStepCompleted) {
+		return c.json({ success: false, code: "ONBOARDING_INCOMPLETE" }, 403);
+	}
+
+	await database
+		.update(signupStatus)
+		.set({
+			signupToken: null
+		})
+		.where(eq(signupStatus.userId, userId as string));
+
+	const refreshToken = await createUserSession(userId as string, c);
+
+	setCookie(c, "refresh_token", refreshToken, {
+		path: "/",
+		secure: process.env.NODE_ENV === "production",
+		httpOnly: true,
+		maxAge: 30 * 24 * 60 * 60, // 30 Days
+		sameSite: "Lax"
+	});
+
+	return c.json(
+		{
+			code: "LOGIN_COMPLETE",
+			success: true
+		},
+		200
+	);
+});

@@ -4,7 +4,8 @@ export const createRateLimiter = (limit: number, windowMs: number): MiddlewareHa
 	const store = new Map<string, { count: number; resetTime: number }>();
 
 	return async (c, next) => {
-		const ip = c.req.header("x-forwarded-for") || "anonymous";
+		const ip = c.get("metadata").ip;
+		console.log(ip);
 		const now = Date.now();
 		const record = store.get(ip) || { count: 0, resetTime: now + windowMs };
 

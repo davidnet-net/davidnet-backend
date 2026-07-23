@@ -13,7 +13,7 @@ export const login = new Hono();
 
 login.post(
 	"/",
-	createRateLimiter(5, 15 * 60 * 1000),
+	createRateLimiter(15, 15 * 60 * 1000),
 	sValidator("json", loginSchema),
 	async (c) => {
 		const data = c.req.valid("json");
@@ -70,7 +70,7 @@ login.post(
 		// Authenticate the user to ask for 2FA methods!
 		//
 
-		const refreshToken = await createUserSession(user.userId);
+		const refreshToken = await createUserSession(user.userId, c);
 
 		setCookie(c, "refresh_token", refreshToken, {
 			path: "/",

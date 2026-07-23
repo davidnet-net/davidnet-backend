@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { getCookie } from "hono/cookie";
+import { deleteCookie, getCookie } from "hono/cookie";
 import { sign, verify } from "hono/jwt";
 
 import { database } from "../../core/database/client";
@@ -61,6 +61,7 @@ session.post("/refresh", async (c) => {
 	const accessTokenPayload = {
 		userID,
 		jwtID,
+		type: "access",
 		issuedAt: nowSec,
 		expiresAt: expiresSec
 	};
@@ -74,4 +75,37 @@ session.post("/refresh", async (c) => {
 		issuedAt: nowSec,
 		expiresAt: expiresSec
 	});
+});
+
+session.delete("/", async (c) => {
+	const refreshToken = getCookie(c, "refresh_token");
+
+	deleteCookie(c, "refresh_token", {
+		path: "/",
+		secure: process.env.NODE_ENV === "production",
+		httpOnly: true,
+		sameSite: "Lax"
+	});
+
+	if (!refreshToken) {
+		return c.json({ success: true, code: "LOGGED_OUT" }, 200);
+	}
+
+	const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
+	if (!REFRESH_SECRET) {
+		throw new Error("[JWT]: JWT_REFRESH_SECRET is not defined in environment variables!");
+	}
+
+	try {
+		const payload = await verify(refreshToken, REFRESH_SECRET, "HS256");
+		const jwtID = payload.jwtID as string;
+
+		if (jwtID) {
+			await database.delete(sessionTokens).where(eq(sessionTokens.jwtId, jwtID));
+		}
+	} catch {
+		// Token was invalid/expired, but cookie is cleared, so we return success
+	}
+
+	return c.json({ success: true, code: "LOGGED_OUT" }, 200);
 });

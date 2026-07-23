@@ -43,9 +43,7 @@ export const signupStatus = authSchema.table("signup_status", {
 		.default(sql`uuidv4()`)
 		.notNull(),
 	preferencesStepCompleted: boolean("preferences_step_completed").default(false).notNull(),
-	signupToken: uuid("signup_token")
-		.default(sql`uuidv4()`)
-		.notNull()
+	signupToken: uuid("signup_token").default(sql`uuidv4()`)
 });
 
 export const userPreferences = authSchema.table("user_preferences", {
@@ -77,7 +75,10 @@ export const sessionTokens = authSchema.table("session_tokens", {
 		.notNull()
 		.references(() => users.userId, { onDelete: "cascade" }),
 	issuedAt: timestamp("issued_at", { withTimezone: true }).notNull(),
-	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
+	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+	ip: text("ip").notNull(),
+	userAgent: text("user_agent").notNull(),
+	countryCode: text("country_code").notNull()
 });
 
 export const auditLogs = authSchema.table("audit_logs", {

@@ -1,0 +1,1 @@
+ALTER TABLE "auth"."signup_status" ALTER COLUMN "signup_token" DROP NOT NULL;

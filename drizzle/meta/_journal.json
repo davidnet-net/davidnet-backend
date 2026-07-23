@@ -1,27 +1,41 @@
 {
-	"version": "7",
-	"dialect": "postgresql",
-	"entries": [
-		{
-			"idx": 0,
-			"version": "7",
-			"when": 1776530376494,
-			"tag": "0000_gifted_daredevil",
-			"breakpoints": true
-		},
-		{
-			"idx": 1,
-			"version": "7",
-			"when": 1776895809564,
-			"tag": "0001_closed_rattler",
-			"breakpoints": true
-		},
-		{
-			"idx": 2,
-			"version": "7",
-			"when": 1784633321961,
-			"tag": "0002_wide_blacklash",
-			"breakpoints": true
-		}
-	]
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1776530376494,
+      "tag": "0000_gifted_daredevil",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1776895809564,
+      "tag": "0001_closed_rattler",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784633321961,
+      "tag": "0002_wide_blacklash",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784642550468,
+      "tag": "0003_mysterious_peter_quill",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784816245532,
+      "tag": "0004_previous_jack_flag",
+      "breakpoints": true
+    }
+  ]
 }
