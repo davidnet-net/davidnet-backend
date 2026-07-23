@@ -1,5 +1,5 @@
 import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
-import { boolean, pgSchema, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, pgSchema, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 export const authSchema = pgSchema("auth");
 
@@ -28,10 +28,26 @@ export const users = authSchema.table("users", {
 	email: text("email").notNull().unique(),
 	countryCode: text("country_code"),
 	location: text("location"),
-	isAdmin: boolean("is_admin").default(false).notNull(),
-	isInternal: boolean("is_internal").default(false).notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 	updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+});
+
+export const securityConfig = authSchema.table("user_security", {
+	userId: uuid("user_id")
+		.primaryKey()
+		.references(() => users.userId, { onDelete: "cascade" }),
+
+	// Indicates whether TOTP 2FA is active for the user
+	authenticatorEnabled: boolean("authenticator_enabled").default(false).notNull(),
+
+	// The secret key (base32 string) shared between backend & app
+	authenticatorSeed: text("authenticator_seed"),
+
+	// Hashed single-use recovery/backup codes
+	backupCodes: jsonb("backup_codes"),
+
+	// Prevents replay attacks by tracking the last timestamp window used
+	lastUsedTotpWindow: integer("last_used_totp_window")
 });
 
 export const signupStatus = authSchema.table("signup_status", {
@@ -106,3 +122,6 @@ export type newUserToken = InferInsertModel<typeof sessionTokens>;
 
 export type auditLog = InferSelectModel<typeof auditLogs>;
 export type newAuditLog = InferInsertModel<typeof auditLogs>;
+
+export type securityConfig = InferSelectModel<typeof securityConfig>;
+export type newsecurityConfig = InferInsertModel<typeof securityConfig>;

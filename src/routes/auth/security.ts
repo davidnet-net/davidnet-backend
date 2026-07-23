@@ -1,11 +1,15 @@
 import { Env, Hono } from "hono";
 import { sValidator } from "@hono/standard-validator";
-import { changePasswordSchema, logoutSessionSchema } from "../../core/requestSchemas/security";
+import {
+	authenticatorEnableSchema,
+	changePasswordSchema,
+	logoutSessionSchema
+} from "../../core/requestSchemas/security";
 import { requireAuth } from "../../middlewares/requireAuth";
 import { createUserAuditLog } from "../../core/shared/auditLogs";
 import { database } from "../../core/database/client";
 import { eq, and, ne } from "drizzle-orm";
-import { users, sessionTokens } from "../../core/database/schema/auth";
+import { users, sessionTokens, securityConfig } from "../../core/database/schema/auth";
 
 export const security = new Hono<Env>();
 
@@ -151,4 +155,221 @@ security.delete("/sessions", requireAuth, async (c) => {
 		.where(and(ne(sessionTokens.jwtId, jwtID), eq(sessionTokens.userId, userID)));
 
 	return c.json({ success: true, code: "LOGGED_OUT" }, 200);
+});
+
+import { generateSecret, generateURI, verify } from "otplib";
+
+security.get("/authenticater-setup", requireAuth, async (c) => {
+	const userID = c.get("user").id;
+
+	// Query 1: Fetch user email
+	const [user] = await database
+		.select({
+			userId: users.userId,
+			email: users.email
+		})
+		.from(users)
+		.where(eq(users.userId, userID))
+		.limit(1);
+
+	if (!user) {
+		return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
+	}
+
+	// Query 2: Check current security settings
+	const [userSecurity] = await database
+		.select({
+			authenticatorEnabled: securityConfig.authenticatorEnabled
+		})
+		.from(securityConfig)
+		.where(eq(securityConfig.userId, userID))
+		.limit(1);
+
+	// Block setup if a row exists AND authenticator is already enabled
+	if (userSecurity?.authenticatorEnabled) {
+		return c.json(
+			{
+				success: false,
+				code: "AUTHENTICATOR_ALREADY_ENABLED",
+				message: "2FA is already enabled for this account."
+			},
+			400
+		);
+	}
+
+	// Generate secret & URI
+	const secret = generateSecret();
+
+	const otpUri = generateURI({
+		issuer: "Davidnet",
+		label: user.email,
+		secret
+	});
+
+	// Save temporary secret to DB
+	await database
+		.insert(securityConfig)
+		.values({
+			userId: user.userId,
+			authenticatorEnabled: false,
+			authenticatorSeed: secret
+		})
+		.onConflictDoUpdate({
+			target: securityConfig.userId,
+			set: { authenticatorSeed: secret, authenticatorEnabled: false }
+		});
+
+	return c.json({ success: true, code: "SETUP_AUTHENTICATER", otpUri }, 200);
+});
+
+security.post(
+	"/authenticator-enable",
+	requireAuth,
+	sValidator("json", authenticatorEnableSchema),
+	async (c) => {
+		const userID = c.get("user").id;
+
+		const code = c.req.valid("json").code;
+		if (code.trim().length !== 6) {
+			return c.json(
+				{
+					success: false,
+					code: "INVALID_INPUT",
+					message: "A 6-digit code is required."
+				},
+				400
+			);
+		}
+
+		// 2. Fetch current security configuration
+		const [userSecurity] = await database
+			.select({
+				authenticatorEnabled: securityConfig.authenticatorEnabled,
+				authenticatorSeed: securityConfig.authenticatorSeed
+			})
+			.from(securityConfig)
+			.where(eq(securityConfig.userId, userID))
+			.limit(1);
+
+		// 3. Check if setup was initiated
+		if (!userSecurity || !userSecurity.authenticatorSeed) {
+			return c.json(
+				{
+					success: false,
+					code: "SETUP_NOT_INITIATED",
+					message: "Authenticator setup has not been initiated."
+				},
+				400
+			);
+		}
+
+		// 4. Check if already enabled
+		if (userSecurity.authenticatorEnabled) {
+			return c.json(
+				{
+					success: false,
+					code: "AUTHENTICATOR_ALREADY_ENABLED",
+					message: "2FA is already enabled for this account."
+				},
+				400
+			);
+		}
+
+		// 5. Verify token against stored seed
+		const result = await verify({
+			secret: userSecurity.authenticatorSeed,
+			token: code.trim()
+		});
+
+		if (!result.valid) {
+			return c.json(
+				{
+					success: false,
+					code: "INVALID_CODE",
+					message: "The code provided is invalid or expired."
+				},
+				400
+			);
+		}
+
+		// 6. Mark authenticator as enabled
+		await database
+			.update(securityConfig)
+			.set({ authenticatorEnabled: true })
+			.where(eq(securityConfig.userId, userID));
+
+		return c.json(
+			{
+				success: true,
+				code: "AUTHENTICATOR_ENABLED",
+				message: "2FA authenticator has been successfully enabled."
+			},
+			200
+		);
+	}
+);
+
+security.get("/2fa-status", requireAuth, async (c) => {
+	const userID = c.get("user").id;
+
+	// Fetch current security configuration
+	const [userSecurity] = await database
+		.select({
+			authenticatorEnabled: securityConfig.authenticatorEnabled
+		})
+		.from(securityConfig)
+		.where(eq(securityConfig.userId, userID))
+		.limit(1);
+
+	return c.json(
+		{
+			success: true,
+			code: "2FA_STATUS",
+			authenticatorEnabled: userSecurity?.authenticatorEnabled ?? false
+		},
+		200
+	);
+});
+
+security.put("/disable-authenticator", requireAuth, async (c) => {
+	const userID = c.get("user").id;
+
+	// 1. Fetch current security configuration
+	const [userSecurity] = await database
+		.select({
+			authenticatorEnabled: securityConfig.authenticatorEnabled
+		})
+		.from(securityConfig)
+		.where(eq(securityConfig.userId, userID))
+		.limit(1);
+
+	// 2. Check if 2FA is actually enabled
+	if (!userSecurity || !userSecurity.authenticatorEnabled) {
+		return c.json(
+			{
+				success: false,
+				code: "AUTHENTICATOR_NOT_ENABLED",
+				message: "2FA is not currently enabled for this account."
+			},
+			400
+		);
+	}
+
+	// 3. Disable authenticator and clear seed
+	await database
+		.update(securityConfig)
+		.set({
+			authenticatorEnabled: false,
+			authenticatorSeed: null
+		})
+		.where(eq(securityConfig.userId, userID));
+
+	return c.json(
+		{
+			success: true,
+			code: "AUTHENTICATOR_DISABLED",
+			message: "Authenticator 2FA has been successfully disabled."
+		},
+		200
+	);
 });

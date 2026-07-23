@@ -119,7 +119,7 @@ signup.post(
 			.values({
 				username: username,
 				password: password,
-				avatarUrl: "http://localhost:5173/temp-profile-picture.png",
+				avatarUrl: "http://localhost:5173/temp.jpg",
 				email: email,
 				displayName: originalUsername
 			})

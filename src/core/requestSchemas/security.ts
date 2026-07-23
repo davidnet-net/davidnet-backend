@@ -8,3 +8,7 @@ export const changePasswordSchema = type({
 export const logoutSessionSchema = type({
 	jwtID: "string"
 });
+
+export const authenticatorEnableSchema = type({
+	code: "string"
+});
