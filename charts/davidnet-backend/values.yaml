@@ -1,0 +1,12 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/davidnet-net/davidnet-backend
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  port: 3000
+
+ingress:
+  publicHost: davidnet-backend.davidnet.net
