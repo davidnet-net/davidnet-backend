@@ -17,7 +17,7 @@ spec:
     spec:
       initContainers:
         - name: db-migrate
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{.Values.image.repository}}:{{.Values.image.tag}}"
           imagePullPolicy: { { .Values.image.pullPolicy } }
           command: ["bun", "run", "db:migrate"]
           env:
@@ -28,7 +28,7 @@ spec:
                   key: DATABASE_URL
       containers:
         - name: backend
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{.Values.image.repository}}:{{.Values.image.tag}}"
           imagePullPolicy: { { .Values.image.pullPolicy } }
           command: ["bun", "run", "index.js"]
           ports:
