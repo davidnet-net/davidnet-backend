@@ -41,7 +41,7 @@ spec:
         - name: backend
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["bun", "run", "index.js"]
+          command: ["bun", "run", "dist/index.js"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
