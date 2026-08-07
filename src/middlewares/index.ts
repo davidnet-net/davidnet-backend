@@ -33,8 +33,10 @@ export async function registerMiddlewares(app: Hono) {
 				return null;
 			},
 			credentials: true,
+
 			allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-			allowHeaders: ["Content-Type", "Authorization"]
+			exposeHeaders: ["x-correlation-id"],
+			allowHeaders: ["Content-Type", "Authorization", "x-tab-session-id", "x-correlation-id"]
 		})
 	);
 	app.use(logger());
