@@ -13,7 +13,7 @@ FROM oven/bun:1-slim
 WORKDIR /app
 
 # Copy built SvelteKit server and production dependencies
-COPY --from=builder /app/build ./build
+COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 
