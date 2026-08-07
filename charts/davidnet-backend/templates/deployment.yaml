@@ -19,7 +19,7 @@ spec:
         - name: db-migrate
           image: "{{.Values.image.repository}}:{{.Values.image.tag}}"
           imagePullPolicy: {{.Values.image.pullPolicy}}
-          command: ["bun", "run", "db:migrate"]
+          command: ["bun", "--bun", "drizzle-kit", "migrate"]
           env:
             - name: DATABASE_URL
               valueFrom:
@@ -32,7 +32,7 @@ spec:
           imagePullPolicy: {{.Values.image.pullPolicy}}
           command: ["bun", "run", "index.js"]
           ports:
-            - containerPort: {{.Values.service.port}}
+            - containerPort: 3020
           env:
             - name: DB_USER
               valueFrom:

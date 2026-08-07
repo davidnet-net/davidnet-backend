@@ -6,7 +6,7 @@ image:
   pullPolicy: IfNotPresent
 
 service:
-  port: 3000
+  port: 3020
 
 ingress:
   publicHost: davidnet-backend.davidnet.net
