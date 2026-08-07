@@ -1,1 +1,8 @@
-npx lint-staged
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+if command -v nix >/dev/null 2>&1; then
+  nix develop --command bun x lint-staged
+else
+  bun x lint-staged
+fi
