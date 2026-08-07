@@ -3,7 +3,7 @@ import { sendEmail } from "../utils/emails";
 
 export async function sendSignupVerifyEmail(emailVerificationToken: string, email: string) {
 	const verifyUrl =
-		(Bun.env.PROD ? "https://account.davidnet.net" : "http://localhost:5173") +
+		(Bun.env.NODE_ENV ? "https://account.davidnet.net" : "http://localhost:5173") +
 		"/signup/verify/email/confirm/" +
 		emailVerificationToken;
 
