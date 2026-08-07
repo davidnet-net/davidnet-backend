@@ -24,7 +24,7 @@ spec:
         - name: db-migrate
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["bun", "--bun", "drizzle-kit", "migrate"]
+          command: ["bun", "run", "meta/scripts/migrateDB.ts"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
