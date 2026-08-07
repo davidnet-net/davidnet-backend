@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: davidnet-backend
-  namespace: "{{.Release.Namespace}}"
+  namespace: "{{ .Release.Namespace }}"
   labels:
     app: davidnet-backend
 spec:
@@ -22,7 +22,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: db-migrate
-          image: "{{.Values.image.repository}}:{{.Values.image.tag}}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: { { .Values.image.pullPolicy } }
           command: ["bun", "--bun", "drizzle-kit", "migrate"]
           securityContext:
@@ -39,7 +39,7 @@ spec:
                   key: DATABASE_URL
       containers:
         - name: backend
-          image: "{{.Values.image.repository}}:{{.Values.image.tag}}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: { { .Values.image.pullPolicy } }
           command: ["bun", "run", "index.js"]
           securityContext:
