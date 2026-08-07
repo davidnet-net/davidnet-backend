@@ -6,7 +6,7 @@ metadata:
   labels:
     app: davidnet-backend
 spec:
-  replicas: { { .Values.replicaCount } }
+  replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
       app: davidnet-backend
@@ -23,7 +23,7 @@ spec:
       initContainers:
         - name: db-migrate
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: { { .Values.image.pullPolicy } }
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["bun", "--bun", "drizzle-kit", "migrate"]
           securityContext:
             allowPrivilegeEscalation: false
@@ -40,7 +40,7 @@ spec:
       containers:
         - name: backend
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: { { .Values.image.pullPolicy } }
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["bun", "run", "index.js"]
           securityContext:
             allowPrivilegeEscalation: false

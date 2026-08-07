@@ -13,3 +13,4 @@ src/lib/paraglide
 volumes/
 node_modules/
 dist/
+charts/**
