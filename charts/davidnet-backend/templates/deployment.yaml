@@ -91,3 +91,8 @@ spec:
                 secretKeyRef:
                   name: backend-secrets
                   key: JWT_ACCESS_SECRET
+            - name: OIDC_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: oidc-private-key
