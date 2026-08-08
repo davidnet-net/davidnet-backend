@@ -129,7 +129,7 @@ oidc.get("/authorize", async (c) => {
 		code,
 		userId: userID,
 		redirectUri,
-		nonce: nonce ?? ""
+		nonce: nonce ?? "",
 		codeChallenge: codeChallenge ?? "",
 		expiresAt
 	});
@@ -234,7 +234,7 @@ oidc.post("/token", async (c) => {
 	}
 	const user = userResult[0];
 
-	// 8. Load Private Key from Environment Variables
+	// 8. Load Private Key from Environment Variables safely
 	const rawPrivateKey = process.env.OIDC_PRIVATE_KEY;
 	if (!rawPrivateKey) {
 		return c.json(
@@ -242,14 +242,23 @@ oidc.post("/token", async (c) => {
 			500
 		);
 	}
-	const privateKeyPem = rawPrivateKey.replace(/\\n/g, "\n");
-	const privateKey = await importPKCS8(privateKeyPem, "RS256");
+
+	const privateKeyPem = rawPrivateKey
+		.trim()
+		.replace(/^["']|["']$/g, "")
+		.replace(/\\n/g, "\n")
+		.replace(/\r\n/g, "\n");
+
+	const privateKey = await importPKCS8(privateKeyPem, "RS256", {
+		extractable: true
+	});
 
 	// 9. Mint the ID Token (JWT)
 	const idToken = await new SignJWT({
 		preferred_username: user.username,
 		email: user.email,
-		name: user.displayName
+		name: user.displayName,
+		nonce: savedCode.nonce
 	})
 		.setProtectedHeader({ alg: "RS256", kid: "internal-oidc-key-1" })
 		.setIssuedAt()

@@ -138,6 +138,7 @@ export const authCodes = authSchema.table("auth_codes", {
 		.references(() => users.userId, { onDelete: "cascade" }),
 	redirectUri: text("redirect_uri").notNull(),
 	codeChallenge: text("code_challenge").notNull(),
+	nonce: text("nonce").notNull(), // Added nonce as a string field
 	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
 });
 
