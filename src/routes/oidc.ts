@@ -31,6 +31,7 @@ oidc.get("/authorize", async (c) => {
 	const responseType = c.req.query("response_type");
 	const state = c.req.query("state");
 	const codeChallenge = c.req.query("code_challenge");
+	const nonce = c.req.query("nonce");
 
 	if (responseType !== "code") {
 		return c.json({ success: false, error: "unsupported_response_type" }, 400);
@@ -128,6 +129,7 @@ oidc.get("/authorize", async (c) => {
 		code,
 		userId: userID,
 		redirectUri,
+		nonce: nonce ?? ""
 		codeChallenge: codeChallenge ?? "",
 		expiresAt
 	});
