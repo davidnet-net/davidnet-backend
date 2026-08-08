@@ -1,6 +1,7 @@
 import { and, eq, gt } from "drizzle-orm";
 import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
+import { verify } from "hono/jwt";
 import { SignJWT, importPKCS8 } from "jose";
 
 import { database } from "../core/database/client";
@@ -43,25 +44,54 @@ oauth.get("/authorize", async (c) => {
 			400
 		);
 	}
-	const cookieValue = getCookie(c, "session_token");
-	if (!cookieValue) {
-		const returnTo = encodeURIComponent(c.req.url);
+
+	// 1. Get the refresh_token from the cookie
+	const token = getCookie(c, "refresh_token");
+	const returnTo = encodeURIComponent(c.req.url);
+
+	if (!token) {
 		return c.redirect(`https://account.davidnet.net/login?continue=${returnTo}`);
 	}
 
-	// 3. Verify cookie in DB
+	const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
+	if (!REFRESH_SECRET) {
+		return c.json(
+			{ success: false, error: "server_error", message: "JWT_REFRESH_SECRET is not configured" },
+			500
+		);
+	}
+
+	let userID: string;
+	let jwtID: string;
+
+	// 2. Verify the refresh token JWT signature & payload type
+	try {
+		const payload = await verify(token, REFRESH_SECRET, "HS256");
+
+		if (payload.type && payload.type !== "refresh") {
+			return c.redirect(`https://account.davidnet.net/login?continue=${returnTo}`);
+		}
+
+		userID = payload.userID as string;
+		jwtID = payload.jwtID as string;
+
+		if (!userID || !jwtID) {
+			return c.redirect(`https://account.davidnet.net/login?continue=${returnTo}`);
+		}
+	} catch {
+		return c.redirect(`https://account.davidnet.net/login?continue=${returnTo}`);
+	}
+
+	// 3. Verify session in DB (handles instant logouts and revocations)
 	const sessionResult = await database
 		.select()
 		.from(sessionTokens)
-		.where(and(eq(sessionTokens.jwtId, cookieValue), gt(sessionTokens.expiresAt, new Date())))
+		.where(and(eq(sessionTokens.jwtId, jwtID), gt(sessionTokens.expiresAt, new Date())))
 		.limit(1);
 
 	if (sessionResult.length === 0) {
-		const returnTo = encodeURIComponent(c.req.url);
 		return c.redirect(`https://account.davidnet.net/login?continue=${returnTo}`);
 	}
-
-	const userID = sessionResult[0].userId;
 
 	// 4. Query DB for Access Permissions
 	const internalAccessResult = await database
