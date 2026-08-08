@@ -33,14 +33,16 @@ export async function registerRoutes(app: Hono) {
 		}
 
 		try {
-			// Robustly normalize line breaks and strip accidental surrounding quotes
 			const privateKeyPem = rawPrivateKey
 				.trim()
 				.replace(/^["']|["']$/g, "")
 				.replace(/\\n/g, "\n")
 				.replace(/\r\n/g, "\n");
 
-			const privateKey = await importPKCS8(privateKeyPem, "RS256");
+			// Explicitly pass extractable: true for Bun/Web Crypto compatibility
+			const privateKey = await importPKCS8(privateKeyPem, "RS256", {
+				extractable: true
+			});
 
 			const publicJwk = await exportJWK(privateKey);
 
