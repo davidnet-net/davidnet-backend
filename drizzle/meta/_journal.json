@@ -64,6 +64,13 @@
       "when": 1786185522300,
       "tag": "0008_kind_silvermane",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786210558296,
+      "tag": "0009_tranquil_punisher",
+      "breakpoints": true
     }
   ]
 }

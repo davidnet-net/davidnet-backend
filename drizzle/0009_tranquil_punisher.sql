@@ -1,0 +1,1 @@
+ALTER TABLE "auth"."auth_codes" ADD COLUMN "nonce" text NOT NULL;
