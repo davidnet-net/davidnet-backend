@@ -1,12 +1,16 @@
-replicaCount: 1
-
-image:
-  repository: ghcr.io/davidnet-net/davidnet-backend
-  tag: latest
-  pullPolicy: Always
-
-service:
-  port: 3020
-
-ingress:
-  publicHost: davidnet-backend.davidnet.net
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: headscale-ingress
+  namespace: headscale
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`headscale.davidnet.net`)
+      kind: Rule
+      services:
+        - name: headscale-service
+          port: 8080
+  tls:
+    certResolver: letsencrypt
