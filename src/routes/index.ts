@@ -24,20 +24,26 @@ export async function registerRoutes(app: Hono) {
 			scopes_supported: ["openid", "profile", "email"]
 		});
 	});
+
 	app.get("/.well-known/jwks.json", async (c) => {
 		const rawPrivateKey = process.env.OIDC_PRIVATE_KEY;
 		if (!rawPrivateKey) {
+			console.error("OIDC_PRIVATE_KEY is missing from environment variables.");
 			return c.json({ error: "Server configuration error" }, 500);
 		}
 
 		try {
-			const privateKeyPem = rawPrivateKey.replace(/\\n/g, "\n");
+			// Robustly normalize line breaks and strip accidental surrounding quotes
+			const privateKeyPem = rawPrivateKey
+				.trim()
+				.replace(/^["']|["']$/g, "")
+				.replace(/\\n/g, "\n")
+				.replace(/\r\n/g, "\n");
+
 			const privateKey = await importPKCS8(privateKeyPem, "RS256");
 
-			// Export public components as a JWK
 			const publicJwk = await exportJWK(privateKey);
 
-			// Strip private key fields to ensure only the public key is served
 			delete publicJwk.d;
 			delete publicJwk.p;
 			delete publicJwk.q;
@@ -52,8 +58,9 @@ export async function registerRoutes(app: Hono) {
 			return c.json({
 				keys: [publicJwk]
 			});
-		} catch {
-			return c.json({ error: "Failed to generate JWKS" }, 500);
+		} catch (err) {
+			console.error("JWKS Generation Error:", err);
+			return c.json({ error: "Failed to generate JWKS", details: String(err) }, 500);
 		}
 	});
 }
