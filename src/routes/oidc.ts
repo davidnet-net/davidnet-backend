@@ -14,14 +14,14 @@ import {
 } from "../core/database/schema/schema";
 import type { Env } from "../middlewares/requireAuth";
 
-export const oauth = new Hono<Env>();
+export const oidc = new Hono<Env>();
 
 const clientRequirements: Record<string, (access: typeof internalAccess.$inferSelect) => boolean> =
 	{
 		headscale: (access) => access.vpnAccess
 	};
 
-oauth.get("/authorize", async (c) => {
+oidc.get("/authorize", async (c) => {
 	const clientId = c.req.query("client_id");
 	const redirectUri = c.req.query("redirect_uri");
 	const responseType = c.req.query("response_type");
@@ -152,7 +152,7 @@ async function verifyPKCE(codeVerifier: string, codeChallenge: string) {
 	return base64Url === codeChallenge;
 }
 
-oauth.post("/token", async (c) => {
+oidc.post("/token", async (c) => {
 	const body = await c.req.parseBody();
 
 	const grantType = body.grant_type;
@@ -262,7 +262,7 @@ oauth.post("/token", async (c) => {
 });
 
 // --- USERINFO ENDPOINT ---
-oauth.get("/userinfo", async (c) => {
+oidc.get("/userinfo", async (c) => {
 	const authHeader = c.req.header("Authorization");
 	if (!authHeader || !authHeader.startsWith("Bearer ")) {
 		return c.json(
