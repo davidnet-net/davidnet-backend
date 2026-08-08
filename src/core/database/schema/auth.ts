@@ -120,6 +120,28 @@ export const internalAccess = authSchema.table("internal_access", {
 	developerAccess: boolean("developer_access").default(false).notNull()
 });
 
+export const internalAccessTokens = authSchema.table("access_tokens", {
+	token: text("token").primaryKey(),
+	userId: uuid("user_id")
+		.notNull()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
+});
+
+// --- INTERNAL OIDC ---
+// Temporary storage for OpenID Connect authorization codes and PKCE challenges
+// used by the internal Headscale VPN and Traefik proxy authentication flow.
+export const authCodes = authSchema.table("auth_codes", {
+	code: text("code").primaryKey(),
+	userId: uuid("user_id")
+		.notNull()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	redirectUri: text("redirect_uri").notNull(),
+	codeChallenge: text("code_challenge").notNull(),
+	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
+});
+
+// --- TYPE EXPORTS ---
 export type user = InferSelectModel<typeof users>;
 export type newUser = InferInsertModel<typeof users>;
 
@@ -140,3 +162,9 @@ export type newsecurityConfig = InferInsertModel<typeof securityConfig>;
 
 export type internalAccess = InferSelectModel<typeof internalAccess>;
 export type newInternalAccess = InferInsertModel<typeof internalAccess>;
+
+export type authCode = InferSelectModel<typeof authCodes>;
+export type newAuthCode = InferInsertModel<typeof authCodes>;
+
+export type internalAccessToken = InferSelectModel<typeof internalAccessTokens>;
+export type newInternalAccessToken = InferInsertModel<typeof internalAccessTokens>;

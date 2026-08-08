@@ -2,10 +2,12 @@ import { Hono } from "hono";
 
 import { auth } from "./auth/auth";
 import { health } from "./health";
+import { oauth } from "./oauth";
 
 export async function registerRoutes(app: Hono) {
 	app.route("/health", health);
 	app.route("/auth", auth);
+	app.route("/oauth", oauth);
 	app.get("/.well-known/openid-configuration", (c) => {
 		return c.json({
 			issuer: "https://davidnet-backend.davidnet.net",
