@@ -7,6 +7,7 @@ import { privacy } from "./privacy";
 import { session } from "./session";
 import { signup } from "./signup";
 import { security } from "./security";
+import { internal } from "./internal";
 
 export const auth = new Hono();
 
@@ -17,3 +18,4 @@ auth.route("/me", me);
 auth.route("/preferences", preferences);
 auth.route("/privacy", privacy);
 auth.route("/security", security);
+auth.route("/internal", internal);
