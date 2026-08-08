@@ -21,6 +21,10 @@ const clientRequirements: Record<string, (access: typeof internalAccess.$inferSe
 		headscale: (access) => access.vpnAccess
 	};
 
+const clientSecrets: Record<string, string | undefined> = {
+	headscale: process.env.HEADSCALE_CLIENT_SECRET
+};
+
 oidc.get("/authorize", async (c) => {
 	const clientId = c.req.query("client_id");
 	const redirectUri = c.req.query("redirect_uri");
@@ -159,13 +163,24 @@ oidc.post("/token", async (c) => {
 	const code = body.code as string;
 	const redirectUri = body.redirect_uri as string;
 	const clientId = body.client_id as string;
+	const clientSecret = body.client_secret as string;
 	const codeVerifier = body.code_verifier as string;
 
 	if (grantType !== "authorization_code") {
 		return c.json({ error: "unsupported_grant_type" }, 400);
 	}
 
-	// 2. Look up the authorization code in the database
+	// 2. Validate Client Credentials
+	if (!clientId || !clientSecrets[clientId]) {
+		return c.json({ error: "invalid_client", error_description: "Unknown client_id" }, 400);
+	}
+
+	const expectedSecret = clientSecrets[clientId];
+	if (!expectedSecret || clientSecret !== expectedSecret) {
+		return c.json({ error: "invalid_client", error_description: "Invalid client secret" }, 401);
+	}
+
+	// 3. Look up the authorization code in the database
 	const authCodeRecord = await database
 		.select()
 		.from(authCodes)
@@ -181,7 +196,7 @@ oidc.post("/token", async (c) => {
 
 	const savedCode = authCodeRecord[0];
 
-	// 3. Validate Expiration and Redirect URI
+	// 4. Validate Expiration and Redirect URI
 	if (savedCode.expiresAt < new Date()) {
 		await database.delete(authCodes).where(eq(authCodes.code, code));
 		return c.json({ error: "invalid_grant", error_description: "Code expired" }, 400);
@@ -191,7 +206,7 @@ oidc.post("/token", async (c) => {
 		return c.json({ error: "invalid_grant", error_description: "Redirect URI mismatch" }, 400);
 	}
 
-	// 4. Verify PKCE
+	// 5. Verify PKCE
 	if (savedCode.codeChallenge && savedCode.codeChallenge !== "NO_CHALLENGE") {
 		if (!codeVerifier) {
 			return c.json({ error: "invalid_grant", error_description: "Missing code_verifier" }, 400);
@@ -202,10 +217,10 @@ oidc.post("/token", async (c) => {
 		}
 	}
 
-	// 5. BURN THE CODE IMMEDIATELY
+	// 6. BURN THE CODE IMMEDIATELY
 	await database.delete(authCodes).where(eq(authCodes.code, code));
 
-	// 6. Fetch user profile information
+	// 7. Fetch user profile information
 	const userResult = await database
 		.select()
 		.from(users)
@@ -217,7 +232,7 @@ oidc.post("/token", async (c) => {
 	}
 	const user = userResult[0];
 
-	// 7. Load Private Key from Environment Variables
+	// 8. Load Private Key from Environment Variables
 	const rawPrivateKey = process.env.OIDC_PRIVATE_KEY;
 	if (!rawPrivateKey) {
 		return c.json(
@@ -228,7 +243,7 @@ oidc.post("/token", async (c) => {
 	const privateKeyPem = rawPrivateKey.replace(/\\n/g, "\n");
 	const privateKey = await importPKCS8(privateKeyPem, "RS256");
 
-	// 8. Mint the ID Token (JWT)
+	// 9. Mint the ID Token (JWT)
 	const idToken = await new SignJWT({
 		preferred_username: user.username,
 		email: user.email,
@@ -242,7 +257,7 @@ oidc.post("/token", async (c) => {
 		.setExpirationTime("1h")
 		.sign(privateKey);
 
-	// 9. Generate and Save an Access Token to the DB
+	// 10. Generate and Save an Access Token to the DB
 	const accessToken = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
 	const tokenExpiresAt = new Date(Date.now() + 3600 * 1000); // 1 hour expiration
 
@@ -252,7 +267,7 @@ oidc.post("/token", async (c) => {
 		expiresAt: tokenExpiresAt
 	});
 
-	// 10. Return the token payload back to the client
+	// 11. Return the token payload back to the client
 	return c.json({
 		access_token: accessToken,
 		token_type: "Bearer",

@@ -96,3 +96,8 @@ spec:
                 secretKeyRef:
                   name: backend-secrets
                   key: oidc-private-key
+            - name: HEADSCALE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: headscale-secret
+                  key: HEADSCALE_CLIENT_SECRET
