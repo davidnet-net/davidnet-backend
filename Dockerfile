@@ -24,5 +24,6 @@ COPY --from=builder /app/drizzle.config.ts ./
 EXPOSE 3000
 ENV PORT=3000
 ENV HOST=0.0.0.0
+ENV NODE_ENV=production
 
 CMD ["bun", "run", "build/index.js"]

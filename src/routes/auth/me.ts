@@ -27,8 +27,6 @@ me.get("/", requireAuth, async (c) => {
 		description: u.description,
 		email: u.email,
 		countryCode: u.countryCode,
-		location: u.location,
-		isAdmin: u.isAdmin,
-		isInternal: u.isInternal
+		location: u.location
 	});
 });

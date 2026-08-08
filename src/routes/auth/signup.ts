@@ -5,6 +5,7 @@ import { setCookie } from "hono/cookie";
 
 import { database } from "../../core/database/client";
 import {
+	internalAccess,
 	signupStatus,
 	userPreferences,
 	userPrivacyPreferences,
@@ -137,6 +138,16 @@ signup.post(
 
 		await database.insert(userPrivacyPreferences).values({
 			userId: userInsertion[0].userID
+		});
+
+		await database.insert(internalAccess).values({
+			userId: userInsertion[0].userID,
+			internalAccess: false,
+			vpnAccess: false,
+			dbsAccess: false,
+			supportAccess: false,
+			monitoringAccess: false,
+			developerAccess: false
 		});
 
 		// Send signup mail

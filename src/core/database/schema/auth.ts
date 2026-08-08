@@ -108,6 +108,18 @@ export const auditLogs = authSchema.table("audit_logs", {
 	message: text("message").notNull()
 });
 
+export const internalAccess = authSchema.table("internal_access", {
+	userId: uuid("user_id")
+		.primaryKey()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	internalAccess: boolean("internal_access").default(false).notNull(),
+	vpnAccess: boolean("vpn_access").default(false).notNull(),
+	dbsAccess: boolean("dbs_access").default(false).notNull(),
+	supportAccess: boolean("support_access").default(false).notNull(),
+	monitoringAccess: boolean("monitoring_access").default(false).notNull(),
+	developerAccess: boolean("developer_access").default(false).notNull()
+});
+
 export type user = InferSelectModel<typeof users>;
 export type newUser = InferInsertModel<typeof users>;
 
@@ -125,3 +137,6 @@ export type newAuditLog = InferInsertModel<typeof auditLogs>;
 
 export type securityConfig = InferSelectModel<typeof securityConfig>;
 export type newsecurityConfig = InferInsertModel<typeof securityConfig>;
+
+export type internalAccess = InferSelectModel<typeof internalAccess>;
+export type newInternalAccess = InferInsertModel<typeof internalAccess>;
