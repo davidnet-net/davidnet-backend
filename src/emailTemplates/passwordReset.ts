@@ -1,14 +1,14 @@
-export const signupVerificationTemplate = `<!doctype html>
+export const passwordResetTemplate = `<!doctype html>
 <html>
     <body>
-        <h1>Congratulations!</h1>
-        <p>With your davidnet account!</p>
-        <a class="verify-button" href="{{verifyemail_url}}">Verify email</a>
+        <h1>Password Reset</h1>
+        <p>We received a request to reset the password for your davidnet account.</p>
+        <a class="verify-button" href="{{resetpassword_url}}">Reset Password</a>
         <div class="SmallSpacer"></div>
 
         <p>
-            If you do not verify, your account will be deleted within 48 hours. If you did not create this
-            account, please ignore this email.
+            If you did not request a password reset, please ignore this email. Your password will remain 
+            unchanged.
         </p>
 
         <br />
@@ -26,7 +26,7 @@ export const signupVerificationTemplate = `<!doctype html>
         <div class="Spacer"></div>
         <br />
         <span>
-            For any questions, visit our 
+            For any questions, visit our help center
             <a href="https://davidnet.net/help">help center</a>
             .
         </span>

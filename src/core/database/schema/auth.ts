@@ -150,6 +150,16 @@ export const twoFactorTokens = authSchema.table("two_factor_tokens", {
 	used: boolean("used").default(false).notNull()
 });
 
+// Add to your schema file
+export const passwordResetTokens = authSchema.table("password_reset_tokens", {
+	token: text("token").primaryKey(),
+	userId: uuid("user_id")
+		.notNull()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+	used: boolean("used").default(false).notNull()
+});
+
 // --- TYPE EXPORTS ---
 export type user = InferSelectModel<typeof users>;
 export type newUser = InferInsertModel<typeof users>;
@@ -180,3 +190,6 @@ export type newInternalAccessToken = InferInsertModel<typeof internalAccessToken
 
 export type TwoFactorToken = InferSelectModel<typeof twoFactorTokens>;
 export type NewTwoFactorToken = InferInsertModel<typeof twoFactorTokens>;
+
+export type PasswordResetToken = InferSelectModel<typeof passwordResetTokens>;
+export type NewPasswordResetToken = InferInsertModel<typeof passwordResetTokens>;
