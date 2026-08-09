@@ -519,3 +519,42 @@ security.post(
 		return c.body(pdfBuffer as any, 200);
 	}
 );
+
+import { desc } from "drizzle-orm";
+import { auditLogs } from "../../core/database/schema/auth";
+
+security.get("/audit-logs", requireAuth, async (c) => {
+	const userID = c.get("user").id;
+
+	try {
+		// Fetch all audit logs for the user, ordered by most recent first
+		const logsResult = await database
+			.select({
+				id: auditLogs.id,
+				createdAt: auditLogs.createdAt,
+				message: auditLogs.message
+			})
+			.from(auditLogs)
+			.where(eq(auditLogs.userId, userID))
+			.orderBy(desc(auditLogs.createdAt));
+
+		return c.json(
+			{
+				success: true,
+				code: "AUDIT_LOGS_RETRIEVED",
+				logs: logsResult
+			},
+			200
+		);
+	} catch (error) {
+		console.error("[auth]: Failed to fetch audit logs", error);
+		return c.json(
+			{
+				success: false,
+				code: "INTERNAL_SERVER_ERROR",
+				message: "An error occurred while fetching audit logs."
+			},
+			500
+		);
+	}
+});
