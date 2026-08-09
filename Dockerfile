@@ -12,15 +12,17 @@ RUN bun run build
 FROM oven/bun:1-slim
 WORKDIR /app
 
-# Copy built SvelteKit server and production dependencies
+# Copy built artifacts and necessary metadata/data files
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/meta/ ./meta/
 COPY --from=builder /app/src/core/constants/ ./src/core/constants/
 COPY --from=builder /app/data/ ./data/
 COPY --from=builder /app/package.json ./
-COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/drizzle/ ./drizzle/
 COPY --from=builder /app/drizzle.config.ts ./
+
+# COPY ENTIRE node_modules to preserve internal package relative JSON paths
+COPY --from=builder /app/node_modules ./node_modules
 
 EXPOSE 3000
 ENV PORT=3000
