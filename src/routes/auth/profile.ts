@@ -26,7 +26,6 @@ profile.get("/", collectAuth, async (c) => {
 			description: users.description,
 			countryCode: users.countryCode,
 
-			// ✅ Fixed: location belongs to the `users` table
 			location: users.location,
 
 			language: userPreferences.language,
@@ -76,7 +75,6 @@ profile.get("/", collectAuth, async (c) => {
 });
 
 import countryList from "country-list";
-import DOMPurify from "isomorphic-dompurify";
 
 profile.patch("/", requireAuth, async (c) => {
 	const userId = c.get("user").id;
@@ -86,7 +84,7 @@ profile.patch("/", requireAuth, async (c) => {
 	const preferenceUpdates: Record<string, any> = {};
 	const privacyUpdates: Record<string, any> = {};
 
-	// 1. Validate and sanitize Description
+	// 1. Validate Description length
 	if (body.description !== undefined) {
 		if (body.description !== null) {
 			if (typeof body.description !== "string") {
@@ -98,18 +96,7 @@ profile.patch("/", requireAuth, async (c) => {
 				return c.json({ success: false, code: "DESCRIPTION_TOO_LONG" }, 400);
 			}
 
-			// Check for XSS: Sanitize string and check if malicious tags/scripts were stripped out
-			const sanitizedDescription = DOMPurify.sanitize(body.description);
-
-			// If the sanitized text differs or contains explicit raw HTML tags attempting script execution
-			if (
-				sanitizedDescription !== body.description ||
-				/<script|javascript:|onerror=/i.test(body.description)
-			) {
-				return c.json({ success: false, code: "XSS_DETECTED" }, 400);
-			}
-
-			userUpdates.description = sanitizedDescription;
+			userUpdates.description = body.description;
 		} else {
 			userUpdates.description = null;
 		}
@@ -134,14 +121,14 @@ profile.patch("/", requireAuth, async (c) => {
 	// 3. Handle remaining allowed fields safely
 	if (body.displayName !== undefined) {
 		if (typeof body.displayName === "string" && body.displayName.trim().length > 0) {
-			userUpdates.displayName = DOMPurify.sanitize(body.displayName.trim());
+			userUpdates.displayName = body.displayName.trim();
 		} else {
 			return c.json({ success: false, code: "INVALID_DISPLAY_NAME" }, 400);
 		}
 	}
 
 	if (body.location !== undefined) {
-		userUpdates.location = body.location ? DOMPurify.sanitize(body.location) : null;
+		userUpdates.location = body.location ? body.location : null;
 	}
 
 	// Preferences table fields

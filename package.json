@@ -23,7 +23,6 @@
 		"globals": "^17.4.0",
 		"hono": "^4.12.1",
 		"husky": "^9.1.7",
-		"isomorphic-dompurify": "^3.22.0",
 		"jose": "^6.2.8",
 		"nodemailer": "^9.0.1",
 		"otplib": "^13.4.1",
