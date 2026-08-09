@@ -19,6 +19,8 @@ import {
 import { createUserSession } from "../../core/shared/jwt";
 import { createRateLimiter } from "../../middlewares/rateLimiter";
 import { verifyAndConsumeBackupCode } from "../../core/shared/recoveryCodes";
+import { createUserAuditLog } from "../../core/shared/auditLogs";
+import { parseUA } from "../../core/utils/uaParser";
 
 export const login = new Hono();
 
@@ -53,6 +55,11 @@ login.post(
 
 		const isPasswordValid = await Bun.password.verify(data.password, user.password);
 		if (!isPasswordValid) {
+			const parsedUA = parseUA(c.get("metadata").userAgent);
+			createUserAuditLog(
+				userResult[0].userId,
+				`Login attempt with invalid password. Has been made from ${c.get("metadata").countryCode} & ${c.get("metadata").ip}. With: ${parsedUA.device} - ${parsedUA.os} - ${parsedUA.browser}.`
+			);
 			return c.json({ success: false, code: "INVALID_CREDENTIALS" }, 401);
 		}
 
@@ -126,128 +133,150 @@ login.post(
 	}
 );
 
-login.post("/verify-2fa", sValidator("json", verify2faSchema), async (c) => {
-	const { mfaToken, code } = c.req.valid("json");
+login.post(
+	"/verify-2fa",
+	createRateLimiter(15, 15 * 60 * 1000),
+	sValidator("json", verify2faSchema),
+	async (c) => {
+		const { mfaToken, code } = c.req.valid("json");
 
-	// 1. Validate the database-backed temporary 2FA token
-	const tokenRecord = await database
-		.select()
-		.from(twoFactorTokens)
-		.where(
-			and(
-				eq(twoFactorTokens.token, mfaToken),
-				eq(twoFactorTokens.used, false),
-				gt(twoFactorTokens.expiresAt, new Date())
+		// 1. Validate the database-backed temporary 2FA token
+		const tokenRecord = await database
+			.select()
+			.from(twoFactorTokens)
+			.where(
+				and(
+					eq(twoFactorTokens.token, mfaToken),
+					eq(twoFactorTokens.used, false),
+					gt(twoFactorTokens.expiresAt, new Date())
+				)
 			)
-		)
-		.limit(1);
+			.limit(1);
 
-	if (tokenRecord.length === 0) {
-		return c.json({ success: false, code: "INVALID_OR_EXPIRED_MFA_TOKEN" }, 401);
+		if (tokenRecord.length === 0) {
+			return c.json({ success: false, code: "INVALID_OR_EXPIRED_MFA_TOKEN" }, 401);
+		}
+
+		const { userId } = tokenRecord[0];
+
+		// 2. Mark the token as used immediately to prevent replay attacks
+		await database
+			.update(twoFactorTokens)
+			.set({ used: true })
+			.where(eq(twoFactorTokens.token, mfaToken));
+
+		// 3. Fetch user's TOTP configuration seed
+		const securityRecord = await database
+			.select({
+				seed: securityConfig.authenticatorSeed
+			})
+			.from(securityConfig)
+			.where(eq(securityConfig.userId, userId))
+			.limit(1);
+
+		if (!securityRecord.length || !securityRecord[0].seed) {
+			return c.json({ success: false, code: "MFA_NOT_CONFIGURED" }, 400);
+		}
+
+		// 4. Verify the TOTP code against the seed using otplib
+		const isValidCode = verify({
+			token: code.trim(),
+			secret: securityRecord[0].seed
+		});
+
+		if (!isValidCode) {
+			createUserAuditLog(
+				userId,
+				`There have been made a 2FA attempt with a invalid authenticator code.`
+			);
+			return c.json({ success: false, code: "INVALID_TOTP_CODE" }, 401);
+		}
+
+		// 5. Success: Create final session & set refresh token cookie
+		const refreshToken = await createUserSession(userId, c);
+
+		setCookie(c, "refresh_token", refreshToken, {
+			path: "/",
+			secure: process.env.NODE_ENV === "production",
+			httpOnly: true,
+			maxAge: 30 * 24 * 60 * 60, // 30 Days
+			sameSite: "Lax"
+		});
+
+		return c.json(
+			{
+				success: true,
+				code: "LOGIN_COMPLETE"
+			},
+			200
+		);
 	}
+);
 
-	const { userId } = tokenRecord[0];
+login.post(
+	"/verify-recovery-code",
+	createRateLimiter(15, 15 * 60 * 1000),
+	sValidator("json", verifyRecoveryCodeSchema),
+	async (c) => {
+		const { mfaToken, code } = c.req.valid("json");
 
-	// 2. Mark the token as used immediately to prevent replay attacks
-	await database
-		.update(twoFactorTokens)
-		.set({ used: true })
-		.where(eq(twoFactorTokens.token, mfaToken));
-
-	// 3. Fetch user's TOTP configuration seed
-	const securityRecord = await database
-		.select({
-			seed: securityConfig.authenticatorSeed
-		})
-		.from(securityConfig)
-		.where(eq(securityConfig.userId, userId))
-		.limit(1);
-
-	if (!securityRecord.length || !securityRecord[0].seed) {
-		return c.json({ success: false, code: "MFA_NOT_CONFIGURED" }, 400);
-	}
-
-	// 4. Verify the TOTP code against the seed using otplib
-	const isValidCode = verify({
-		token: code.trim(),
-		secret: securityRecord[0].seed
-	});
-
-	if (!isValidCode) {
-		return c.json({ success: false, code: "INVALID_TOTP_CODE" }, 401);
-	}
-
-	// 5. Success: Create final session & set refresh token cookie
-	const refreshToken = await createUserSession(userId, c);
-
-	setCookie(c, "refresh_token", refreshToken, {
-		path: "/",
-		secure: process.env.NODE_ENV === "production",
-		httpOnly: true,
-		maxAge: 30 * 24 * 60 * 60, // 30 Days
-		sameSite: "Lax"
-	});
-
-	return c.json(
-		{
-			success: true,
-			code: "LOGIN_COMPLETE"
-		},
-		200
-	);
-});
-
-login.post("/verify-recovery-code", sValidator("json", verifyRecoveryCodeSchema), async (c) => {
-	const { mfaToken, code } = c.req.valid("json");
-
-	// 1. Validate the database-backed temporary 2FA token
-	const tokenRecord = await database
-		.select()
-		.from(twoFactorTokens)
-		.where(
-			and(
-				eq(twoFactorTokens.token, mfaToken),
-				eq(twoFactorTokens.used, false),
-				gt(twoFactorTokens.expiresAt, new Date())
+		// 1. Validate the database-backed temporary 2FA token
+		const tokenRecord = await database
+			.select()
+			.from(twoFactorTokens)
+			.where(
+				and(
+					eq(twoFactorTokens.token, mfaToken),
+					eq(twoFactorTokens.used, false),
+					gt(twoFactorTokens.expiresAt, new Date())
+				)
 			)
-		)
-		.limit(1);
+			.limit(1);
 
-	if (tokenRecord.length === 0) {
-		return c.json({ success: false, code: "INVALID_OR_EXPIRED_MFA_TOKEN" }, 401);
+		if (tokenRecord.length === 0) {
+			return c.json({ success: false, code: "INVALID_OR_EXPIRED_MFA_TOKEN" }, 401);
+		}
+
+		const { userId } = tokenRecord[0];
+
+		// 2. Mark the challenge token as used immediately to prevent replay attacks
+		await database
+			.update(twoFactorTokens)
+			.set({ used: true })
+			.where(eq(twoFactorTokens.token, mfaToken));
+
+		// 3. Verify and consume the backup code against user's stored hashes
+		const isRecoveryCodeValid = await verifyAndConsumeBackupCode(userId, code.trim());
+
+		if (!isRecoveryCodeValid) {
+			createUserAuditLog(
+				userId,
+				`There have been made a 2FA attempt with a invalid recovery code.`
+			);
+			return c.json({ success: false, code: "INVALID_RECOVERY_CODE" }, 401);
+		}
+
+		createUserAuditLog(
+			userId,
+			`Recovery code XXXX-XXXX-XXXX-${code.slice(-4)} has been used and cannot be used again.`
+		);
+		// 4. Success: Create final session & set refresh token cookie
+		const refreshToken = await createUserSession(userId, c);
+
+		setCookie(c, "refresh_token", refreshToken, {
+			path: "/",
+			secure: process.env.NODE_ENV === "production",
+			httpOnly: true,
+			maxAge: 30 * 24 * 60 * 60, // 30 Days
+			sameSite: "Lax"
+		});
+
+		return c.json(
+			{
+				success: true,
+				code: "LOGIN_COMPLETE"
+			},
+			200
+		);
 	}
-
-	const { userId } = tokenRecord[0];
-
-	// 2. Mark the challenge token as used immediately to prevent replay attacks
-	await database
-		.update(twoFactorTokens)
-		.set({ used: true })
-		.where(eq(twoFactorTokens.token, mfaToken));
-
-	// 3. Verify and consume the backup code against user's stored hashes
-	const isRecoveryCodeValid = await verifyAndConsumeBackupCode(userId, code.trim());
-
-	if (!isRecoveryCodeValid) {
-		return c.json({ success: false, code: "INVALID_RECOVERY_CODE" }, 401);
-	}
-
-	// 4. Success: Create final session & set refresh token cookie
-	const refreshToken = await createUserSession(userId, c);
-
-	setCookie(c, "refresh_token", refreshToken, {
-		path: "/",
-		secure: process.env.NODE_ENV === "production",
-		httpOnly: true,
-		maxAge: 30 * 24 * 60 * 60, // 30 Days
-		sameSite: "Lax"
-	});
-
-	return c.json(
-		{
-			success: true,
-			code: "LOGIN_COMPLETE"
-		},
-		200
-	);
-});
+);

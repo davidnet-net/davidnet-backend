@@ -4,6 +4,8 @@ import { database } from "../database/client";
 import { sessionTokens } from "../database/schema/schema";
 import { Context } from "hono";
 import { type Env } from "../../middlewares/metadata";
+import { createUserAuditLog } from "./auditLogs";
+import { parseUA } from "../utils/uaParser";
 
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
 
@@ -22,6 +24,12 @@ export async function createUserSession(userID: string, c: Context<Env>) {
 			countryCode: c.get("metadata").countryCode
 		})
 		.returning({ jwtId: sessionTokens.jwtId });
+
+	const parsedUA = parseUA(c.get("metadata").userAgent);
+	await createUserAuditLog(
+		userID,
+		`New login from ${c.get("metadata").countryCode} & ${c.get("metadata").ip}. With: ${parsedUA.device} - ${parsedUA.os} - ${parsedUA.browser}.  .`
+	);
 
 	const refreshTokenPayload = {
 		userID: userID,
