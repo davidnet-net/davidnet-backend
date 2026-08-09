@@ -16,6 +16,7 @@ WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/meta/ ./meta/
 COPY --from=builder /app/src/core/constants/ ./src/core/constants/
+COPY --from=builder /app/data/ ./data/
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/drizzle/ ./drizzle/
@@ -26,4 +27,4 @@ ENV PORT=3000
 ENV HOST=0.0.0.0
 ENV NODE_ENV=production
 
-CMD ["bun", "run", "build/index.js"]
+CMD ["bun", "run", "dist/index.js"]
