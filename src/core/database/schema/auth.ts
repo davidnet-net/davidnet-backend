@@ -141,6 +141,14 @@ export const authCodes = authSchema.table("auth_codes", {
 	nonce: text("nonce").notNull(), // Added nonce as a string field
 	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
 });
+export const twoFactorTokens = authSchema.table("two_factor_tokens", {
+	token: text("token").primaryKey(), // Can use crypto.randomUUID() or random hex/base32
+	userId: uuid("user_id")
+		.notNull()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+	used: boolean("used").default(false).notNull()
+});
 
 // --- TYPE EXPORTS ---
 export type user = InferSelectModel<typeof users>;
@@ -169,3 +177,6 @@ export type newAuthCode = InferInsertModel<typeof authCodes>;
 
 export type internalAccessToken = InferSelectModel<typeof internalAccessTokens>;
 export type newInternalAccessToken = InferInsertModel<typeof internalAccessTokens>;
+
+export type TwoFactorToken = InferSelectModel<typeof twoFactorTokens>;
+export type NewTwoFactorToken = InferInsertModel<typeof twoFactorTokens>;

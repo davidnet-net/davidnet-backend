@@ -1,0 +1,15 @@
+services:
+  database:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+      POSTGRES_DB: ${DB_NAME:-my_database}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./volumes/pgdata:/var/lib/postgresql
+    restart: unless-stopped
+
+volumes:
+  pgdata:

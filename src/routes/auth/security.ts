@@ -158,6 +158,7 @@ security.delete("/sessions", requireAuth, async (c) => {
 });
 
 import { generateSecret, generateURI, verify } from "otplib";
+import { generateNewBackupCodes } from "../../core/shared/recoveryCodes";
 
 security.get("/authenticater-setup", requireAuth, async (c) => {
 	const userID = c.get("user").id;
@@ -372,4 +373,139 @@ security.put("/disable-authenticator", requireAuth, async (c) => {
 		},
 		200
 	);
+});
+
+import PDFDocument from "pdfkit";
+
+security.post("/generate-recovery-codes", requireAuth, async (c) => {
+	const userID = c.get("user").id;
+
+	// 1. Ensure 2FA is enabled before generating recovery codes
+	const [userSecurity] = await database
+		.select({
+			authenticatorEnabled: securityConfig.authenticatorEnabled
+		})
+		.from(securityConfig)
+		.where(eq(securityConfig.userId, userID))
+		.limit(1);
+
+	if (!userSecurity || !userSecurity.authenticatorEnabled) {
+		return c.json(
+			{
+				success: false,
+				code: "AUTHENTICATOR_NOT_ENABLED",
+				message: "You must enable 2FA authenticator before generating recovery codes."
+			},
+			400
+		);
+	}
+
+	// 2. Generate new plaintext and hashed codes using Bun
+	const { plainCodes, hashedCodesObject } = await generateNewBackupCodes(8);
+
+	// 3. Save hashed codes to DB (overwriting any previous codes)
+	await database
+		.update(securityConfig)
+		.set({ backupCodes: hashedCodesObject })
+		.where(eq(securityConfig.userId, userID));
+
+	// 4. Generate PDF using PDFKit in memory with proper layout spacing
+	const pdfBuffer = await new Promise<Buffer>((resolve, reject) => {
+		const doc = new PDFDocument({ size: "A4", margin: 50 });
+		const chunks: Buffer[] = [];
+
+		doc.on("data", (chunk) => chunks.push(chunk));
+		doc.on("end", () => resolve(Buffer.concat(chunks)));
+		doc.on("error", (err) => reject(err));
+
+		// --- Header ---
+		doc
+			.font("Helvetica-Bold")
+			.fontSize(20)
+			.fillColor("#0f172a")
+			.text("Davidnet Account Recovery Codes");
+
+		doc.moveDown(0.3);
+
+		doc
+			.font("Helvetica")
+			.fontSize(10)
+			.fillColor("#64748b")
+			.text(`Generated on: ${new Date().toISOString().split("T")[0]}`);
+
+		doc.moveDown(1.5);
+
+		// --- Warning Box (Auto-calculated Y position) ---
+		const boxTop = doc.y;
+		const boxHeight = 65;
+		const pageWidth = doc.page.width - 100; // 50 margin on each side
+
+		// Draw background and border
+		doc.rect(50, boxTop, pageWidth, boxHeight).fillAndStroke("#fffbeb", "#fde68a");
+
+		// Warning Title
+		doc
+			.font("Helvetica-Bold")
+			.fillColor("#b45309")
+			.fontSize(11)
+			.text("Important", 65, boxTop + 12);
+
+		// Warning Description
+		doc
+			.font("Helvetica")
+			.fillColor("#92400e")
+			.fontSize(9)
+			.text(
+				"Keep these recovery codes in a secure, offline location. Each code can only be used once to log in if you lose access to your primary 2FA authenticator device. Never share these codes with anyone.",
+				65,
+				boxTop + 28,
+				{ width: pageWidth - 30 }
+			);
+
+		// Move cursor safely below the warning box
+		doc.y = boxTop + boxHeight + 25;
+
+		// --- Codes Section ---
+		doc.font("Helvetica-Bold").fontSize(12).fillColor("#0f172a").text("Your Emergency Codes:");
+
+		doc.moveDown(0.8);
+
+		// Render codes list cleanly with consistent spacing
+		plainCodes.forEach((code) => {
+			doc.font("Helvetica-Bold").fontSize(14).fillColor("#0f172a").text(code, { align: "left" });
+			doc.moveDown(0.4);
+		});
+
+		doc.moveDown(1.5);
+
+		// --- Instructions Footer ---
+		doc
+			.font("Helvetica-Bold")
+			.fontSize(10)
+			.fillColor("#334155")
+			.text("Instructions & Best Practices:");
+
+		doc.moveDown(0.5);
+
+		doc.font("Helvetica").fontSize(9);
+		doc.text(
+			"• Single Use: Once you use a recovery code to log in, it becomes permanently invalid."
+		);
+		doc.moveDown(0.3);
+		doc.text(
+			"• Secure Storage: Store this document in a secure, offline place (like a password manager secure note or physical safe)."
+		);
+		doc.moveDown(0.3);
+		doc.text(
+			"• Regeneration: Generating a new set of codes will immediately invalidate all previously saved codes."
+		);
+
+		doc.end();
+	});
+
+	// 5. Return PDF as a downloadable attachment
+	c.header("Content-Type", "application/pdf");
+	c.header("Content-Disposition", `attachment; filename="davidnet-recovery-codes.pdf"`);
+
+	return c.body(pdfBuffer as any, 200);
 });

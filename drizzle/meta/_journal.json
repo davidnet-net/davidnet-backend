@@ -71,6 +71,13 @@
       "when": 1786210558296,
       "tag": "0009_tranquil_punisher",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786269516069,
+      "tag": "0010_flaky_black_tarantula",
+      "breakpoints": true
     }
   ]
 }
