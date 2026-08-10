@@ -96,11 +96,6 @@ spec:
                 secretKeyRef:
                   name: backend-secrets
                   key: oidc-private-key
-            - name: GARAGE_ENDPOINT
-              valueFrom:
-                secretKeyRef:
-                  name: backend-secrets
-                  key: GARAGE_ENDPOINT
             - name: GARAGE_ACCESS_KEY
               valueFrom:
                 secretKeyRef:

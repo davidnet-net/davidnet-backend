@@ -6,7 +6,7 @@ if (!process.env.GARAGE_ACCESS_KEY || !process.env.GARAGE_SECRET_KEY) {
 
 const s3 = new S3Client({
 	region: "garage",
-	endpoint: process.env.GARAGE_ENDPOINT || "http://garage.garage.svc.cluster.local:3900",
+	endpoint: "http://garage.garage.svc.cluster.local:3900",
 	forcePathStyle: true,
 	credentials: {
 		accessKeyId: process.env.GARAGE_ACCESS_KEY!,
