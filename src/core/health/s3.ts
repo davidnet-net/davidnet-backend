@@ -1,8 +1,12 @@
 import { S3Client, HeadBucketCommand } from "@aws-sdk/client-s3";
 
+if (!process.env.GARAGE_ACCESS_KEY || !process.env.GARAGE_SECRET_KEY) {
+	console.error("CRITICAL: Garage credentials are missing from environment variables!");
+}
+
 const s3 = new S3Client({
 	region: "garage",
-	endpoint: process.env.GARAGE_ENDPOINT,
+	endpoint: process.env.GARAGE_ENDPOINT || "http://garage.garage.svc.cluster.local:3900",
 	forcePathStyle: true,
 	credentials: {
 		accessKeyId: process.env.GARAGE_ACCESS_KEY!,
@@ -12,7 +16,7 @@ const s3 = new S3Client({
 
 export async function checkS3Health(): Promise<boolean> {
 	try {
-		await s3.send(new HeadBucketCommand({ Bucket: "profile-pictures" }));
+		await s3.send(new HeadBucketCommand({ Bucket: "app-attachments" }));
 		return true;
 	} catch (error) {
 		console.error("Storage health-check failed:", error);
