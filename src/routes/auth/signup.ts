@@ -120,7 +120,8 @@ signup.post(
 			.values({
 				username: username,
 				password: password,
-				avatarUrl: "https://account.davidnet.net/temp.jpg",
+				avatarUrl: "https://account.davidnet.net/default-avatar-picture.jpg",
+				bannerUrl: "https://account.davidnet.net/default-banner-picture.jpg",
 				email: email,
 				displayName: originalUsername
 			})
