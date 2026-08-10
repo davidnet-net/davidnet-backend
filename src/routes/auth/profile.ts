@@ -1,13 +1,16 @@
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
+import countryList from "country-list";
 
 import { database } from "../../core/database/client";
 import { users, userPreferences, userPrivacyPreferences } from "../../core/database/schema/schema";
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
 import { collectAuth } from "../../middlewares/collectAuth";
+import { uploadToBucket, getFromBucket } from "../../core/shared/s3";
 
 export const profile = new Hono<Env>();
 
+// --- GET PROFILE ---
 profile.get("/", collectAuth, async (c) => {
 	const requestedUserId = c.req.query("user");
 	const requestingUserId = c.get("user")?.id;
@@ -74,8 +77,7 @@ profile.get("/", collectAuth, async (c) => {
 	return c.json({ success: true, code: "SUCCESS", profileResponse });
 });
 
-import countryList from "country-list";
-
+// --- PATCH PROFILE DETAILS ---
 profile.patch("/", requireAuth, async (c) => {
 	const userId = c.get("user").id;
 	const body = await c.req.json();
@@ -91,7 +93,6 @@ profile.patch("/", requireAuth, async (c) => {
 				return c.json({ success: false, code: "INVALID_DESCRIPTION_TYPE" }, 400);
 			}
 
-			// Check length (max 800 characters)
 			if (body.description.length > 800) {
 				return c.json({ success: false, code: "DESCRIPTION_TOO_LONG" }, 400);
 			}
@@ -194,3 +195,80 @@ profile.patch("/", requireAuth, async (c) => {
 		return c.json({ success: false, code: "UPDATE_FAILED" }, 500);
 	}
 });
+
+// --- HELPER FOR UPLOADS ---
+async function handleImageUpload(c: any, type: "avatar" | "banner") {
+	const userId = c.get("user").id;
+	const body = await c.req.parseBody();
+	const file = body["image"];
+
+	if (!file || !(file instanceof File)) {
+		return c.json({ success: false, code: "MISSING_IMAGE_FILE" }, 400);
+	}
+
+	const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/avif"];
+	if (!allowedTypes.includes(file.type)) {
+		return c.json({ success: false, code: "INVALID_FILE_TYPE" }, 400);
+	}
+
+	if (file.size > 5 * 1024 * 1024) {
+		return c.json({ success: false, code: "FILE_TOO_LARGE" }, 400);
+	}
+
+	const bucketName = type === "avatar" ? "profile-pictures" : "banner-pictures";
+	const fileExt = file.type.split("/")[1] || "jpg";
+	const fileName = `${userId}.${fileExt}`;
+	const buffer = Buffer.from(await file.arrayBuffer());
+
+	try {
+		await uploadToBucket(bucketName, fileName, buffer, file.type);
+
+		// Construct the full absolute URL endpoint path
+		const fullUrl = `https://davidnet-backend.davidnet.net/profile/${type}/${fileName}`;
+
+		const updateData =
+			type === "avatar"
+				? { avatarUrl: fullUrl, updatedAt: new Date() }
+				: { bannerUrl: fullUrl, updatedAt: new Date() };
+
+		await database.update(users).set(updateData).where(eq(users.userId, userId));
+
+		return c.json({ success: true, code: `${type.toUpperCase()}_UPDATED`, url: fullUrl });
+	} catch (error) {
+		console.error(`Failed to upload ${type}:`, error);
+		return c.json({ success: false, code: "UPLOAD_FAILED" }, 500);
+	}
+}
+
+// --- UPLOAD ENDPOINTS ---
+profile.put("/avatar", requireAuth, async (c) => handleImageUpload(c, "avatar"));
+profile.put("/banner", requireAuth, async (c) => handleImageUpload(c, "banner"));
+
+// --- HELPER FOR RETRIEVAL ---
+async function handleImageRetrieval(c: any, type: "avatar" | "banner") {
+	const filename = c.req.param("filename");
+	if (!filename) {
+		return c.json({ error: "Missing filename" }, 400);
+	}
+
+	const bucketName = type === "avatar" ? "profile-pictures" : "banner-pictures";
+
+	try {
+		const s3Object = await getFromBucket(bucketName, filename);
+
+		if (!s3Object.Body) {
+			return c.json({ error: "Image not found" }, 404);
+		}
+
+		c.header("Content-Type", s3Object.ContentType || "application/octet-stream");
+		c.header("Cache-Control", "public, max-age=86400");
+
+		return c.body(s3Object.Body.transformToWebStream());
+	} catch (error) {
+		return c.json({ error: "Image not found" }, 404);
+	}
+}
+
+// --- DELIVERY ENDPOINTS ---
+profile.get("/avatar/:filename", async (c) => handleImageRetrieval(c, "avatar"));
+profile.get("/banner/:filename", async (c) => handleImageRetrieval(c, "banner"));
