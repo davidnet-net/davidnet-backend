@@ -224,7 +224,7 @@ async function handleImageUpload(c: any, type: "avatar" | "banner") {
 		await uploadToBucket(bucketName, fileName, buffer, file.type);
 
 		// Construct the full absolute URL endpoint path
-		const fullUrl = `https://davidnet-backend.davidnet.net/profile/${type}/${fileName}`;
+		const fullUrl = `https://davidnet-backend.davidnet.net/auth/profile/${type}/${fileName}`;
 
 		const updateData =
 			type === "avatar"
