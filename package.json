@@ -10,6 +10,7 @@
 		"lint": "bun x prettier --check . '!./volumes' && bun x eslint ."
 	},
 	"dependencies": {
+		"@aws-sdk/client-s3": "^3.1106.0",
 		"@eslint/compat": "^2.0.3",
 		"@eslint/js": "^10.0.1",
 		"@hono/standard-validator": "^0.2.2",

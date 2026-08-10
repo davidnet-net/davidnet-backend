@@ -1,21 +1,24 @@
 import { checkDatabaseHealth } from "./database";
+import { checkS3Health } from "./s3";
 
 interface healthReportType {
 	services: {
 		database: boolean;
+		s3: boolean; // Fixed type from false to boolean
 	};
 	isHealthy: boolean;
 	date: Date;
 }
+
 export const healthReport: healthReportType = {
 	services: {
-		database: false
+		database: false,
+		s3: false
 	},
 	isHealthy: false,
 	date: new Date()
 };
 
-// Health Report schedular
 let healthTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function setupNextHealthBeat() {
@@ -32,15 +35,25 @@ export function stopHealthBeat() {
 }
 
 /**
- * Updates the health report. And schedules an new healthBeat after.
+ * Updates the health report and schedules a new healthBeat after.
  */
 async function healthBeat() {
-	const databaseHealthy = await checkDatabaseHealth();
-	healthReport.services.database = databaseHealthy;
+	try {
+		const databaseHealthy = await checkDatabaseHealth();
+		const s3Healthy = await checkS3Health();
 
-	healthReport.date = new Date();
-	healthReport.isHealthy = databaseHealthy; // && other check
+		healthReport.services.database = databaseHealthy;
+		healthReport.services.s3 = s3Healthy;
 
-	if (healthTimer === null) return;
-	setupNextHealthBeat();
+		healthReport.date = new Date();
+		healthReport.isHealthy = databaseHealthy && s3Healthy;
+	} catch (error) {
+		console.error("Error running health check beat:", error);
+		healthReport.isHealthy = false;
+		healthReport.date = new Date();
+	} finally {
+		if (healthTimer !== null) {
+			setupNextHealthBeat();
+		}
+	}
 }
