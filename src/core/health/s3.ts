@@ -16,7 +16,7 @@ const s3 = new S3Client({
 
 export async function checkS3Health(): Promise<boolean> {
 	try {
-		await s3.send(new HeadBucketCommand({ Bucket: "app-attachments" }));
+		await s3.send(new HeadBucketCommand({ Bucket: "profile-pictures" }));
 		return true;
 	} catch (error) {
 		console.error("Storage health-check failed:", error);
