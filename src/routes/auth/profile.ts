@@ -223,7 +223,7 @@ async function handleImageUpload(c: any, type: "avatar" | "banner") {
 	try {
 		await uploadToBucket(bucketName, fileName, buffer, file.type);
 
-		// Construct the full absolute URL endpoint path
+		// Construct clean absolute URL endpoint path (stored clean in database for caching)
 		const fullUrl = `https://davidnet-backend.davidnet.net/auth/profile/${type}/${fileName}`;
 
 		const updateData =
@@ -233,7 +233,15 @@ async function handleImageUpload(c: any, type: "avatar" | "banner") {
 
 		await database.update(users).set(updateData).where(eq(users.userId, userId));
 
-		return c.json({ success: true, code: `${type.toUpperCase()}_UPDATED`, url: fullUrl });
+		// Return a fresh timestamp version token alongside the URL so client knows it updated
+		const versionToken = Date.now();
+
+		return c.json({
+			success: true,
+			code: `${type.toUpperCase()}_UPDATED`,
+			url: fullUrl,
+			version: versionToken
+		});
 	} catch (error) {
 		console.error(`Failed to upload ${type}:`, error);
 		return c.json({ success: false, code: "UPLOAD_FAILED" }, 500);
@@ -261,7 +269,8 @@ async function handleImageRetrieval(c: any, type: "avatar" | "banner") {
 		}
 
 		c.header("Content-Type", s3Object.ContentType || "application/octet-stream");
-		c.header("Cache-Control", "public, max-age=86400");
+		// Allow aggressive client-side browser caching, with mandatory revalidation check
+		c.header("Cache-Control", "public, max-age=86400, must-revalidate");
 
 		return c.body(s3Object.Body.transformToWebStream());
 	} catch (error) {
