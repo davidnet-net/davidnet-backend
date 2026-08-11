@@ -36,17 +36,9 @@ export const securityConfig = authSchema.table("user_security", {
 	userId: uuid("user_id")
 		.primaryKey()
 		.references(() => users.userId, { onDelete: "cascade" }),
-
-	// Indicates whether TOTP 2FA is active for the user
 	authenticatorEnabled: boolean("authenticator_enabled").default(false).notNull(),
-
-	// The secret key (base32 string) shared between backend & app
 	authenticatorSeed: text("authenticator_seed"),
-
-	// Hashed single-use recovery/backup codes
 	backupCodes: jsonb("backup_codes"),
-
-	// Prevents replay attacks by tracking the last timestamp window used
 	lastUsedTotpWindow: integer("last_used_totp_window")
 });
 
@@ -128,9 +120,6 @@ export const internalAccessTokens = authSchema.table("access_tokens", {
 	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
 });
 
-// --- INTERNAL OIDC ---
-// Temporary storage for OpenID Connect authorization codes and PKCE challenges
-// used by the internal Headscale VPN and Traefik proxy authentication flow.
 export const authCodes = authSchema.table("auth_codes", {
 	code: text("code").primaryKey(),
 	userId: uuid("user_id")
@@ -142,7 +131,7 @@ export const authCodes = authSchema.table("auth_codes", {
 	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
 });
 export const twoFactorTokens = authSchema.table("two_factor_tokens", {
-	token: text("token").primaryKey(), // Can use crypto.randomUUID() or random hex/base32
+	token: text("token").primaryKey(),
 	userId: uuid("user_id")
 		.notNull()
 		.references(() => users.userId, { onDelete: "cascade" }),
@@ -150,7 +139,6 @@ export const twoFactorTokens = authSchema.table("two_factor_tokens", {
 	used: boolean("used").default(false).notNull()
 });
 
-// Add to your schema file
 export const passwordResetTokens = authSchema.table("password_reset_tokens", {
 	token: text("token").primaryKey(),
 	userId: uuid("user_id")

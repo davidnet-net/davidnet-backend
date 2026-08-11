@@ -4,10 +4,13 @@ import { auth } from "./auth/auth";
 import { health } from "./health";
 import { oidc } from "./oidc";
 import { exportJWK, importPKCS8 } from "jose";
+import { social } from "./social/social";
 
 export async function registerRoutes(app: Hono) {
 	app.route("/health", health);
 	app.route("/auth", auth);
+	app.route("/social", social);
+
 	app.route("/oidc", oidc);
 
 	app.get("/.well-known/openid-configuration", (c) => {

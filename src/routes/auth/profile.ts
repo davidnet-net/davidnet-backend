@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import countryList from "country-list";
 
@@ -7,10 +7,10 @@ import { users, userPreferences, userPrivacyPreferences } from "../../core/datab
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
 import { collectAuth } from "../../middlewares/collectAuth";
 import { uploadToBucket, getFromBucket } from "../../core/shared/s3";
+import { userConnections } from "../../core/database/schema/connections";
 
 export const profile = new Hono<Env>();
 
-// --- GET PROFILE ---
 profile.get("/", collectAuth, async (c) => {
 	const requestedUserId = c.req.query("user");
 	const requestingUserId = c.get("user")?.id;
@@ -18,7 +18,6 @@ profile.get("/", collectAuth, async (c) => {
 	if (!requestedUserId) {
 		return c.json({ error: "Missing 'user' query parameter" }, 400);
 	}
-
 	const result = await database
 		.select({
 			userId: users.userId,
@@ -28,7 +27,6 @@ profile.get("/", collectAuth, async (c) => {
 			bannerUrl: users.bannerUrl,
 			description: users.description,
 			countryCode: users.countryCode,
-
 			location: users.location,
 
 			language: userPreferences.language,
@@ -53,6 +51,21 @@ profile.get("/", collectAuth, async (c) => {
 		return c.json({ error: "User not found" }, 404);
 	}
 
+	const connectionsCountResult = await database
+		.select({ count: sql`count(*)` })
+		.from(userConnections)
+		.where(
+			and(
+				eq(userConnections.status, "accepted"),
+				or(
+					eq(userConnections.senderId, requestedUserId),
+					eq(userConnections.receiverId, requestedUserId)
+				)
+			)
+		);
+
+	const acceptedConnectionsCount = Number(connectionsCountResult[0]?.count ?? 0);
+
 	const isOwnProfile = requestingUserId === targetUser.userId;
 
 	const canView = (visibility: string | null | undefined) => {
@@ -71,7 +84,8 @@ profile.get("/", collectAuth, async (c) => {
 		location: canView(targetUser.locationVisibility) ? targetUser.location : undefined,
 		language: canView(targetUser.languageVisibility) ? targetUser.language : undefined,
 		timezone: canView(targetUser.timezoneVisibility) ? targetUser.timezone : undefined,
-		email: canView(targetUser.emailVisibility) ? targetUser.email : undefined
+		email: canView(targetUser.emailVisibility) ? targetUser.email : undefined,
+		connectionsCount: acceptedConnectionsCount
 	};
 
 	return c.json({ success: true, code: "SUCCESS", profileResponse });
@@ -223,8 +237,7 @@ async function handleImageUpload(c: any, type: "avatar" | "banner") {
 	try {
 		await uploadToBucket(bucketName, fileName, buffer, file.type);
 
-		// Return a fresh timestamp version token alongside the URL so client knows it updated
-		const versionToken = Date.now();
+		const versionToken = Math.random().toString(36).substring(2, 7);
 
 		// Construct clean absolute URL endpoint path (stored clean in database for caching)
 		const fullUrl = `https://davidnet-backend.davidnet.net/auth/profile/${type}/${fileName}?v=${versionToken}`;

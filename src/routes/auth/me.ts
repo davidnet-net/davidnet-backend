@@ -19,6 +19,8 @@ me.get("/", requireAuth, async (c) => {
 	const u = userResult[0];
 
 	return c.json({
+		code: "success",
+		success: true,
 		userID: u.userId,
 		username: u.username,
 		displayName: u.displayName,
