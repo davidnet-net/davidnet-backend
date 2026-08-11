@@ -71,7 +71,14 @@ connections.get("/status", requireAuth, sValidator("json", requestedUserSchema),
 	const { requestedUserID } = c.req.valid("json");
 
 	if (userID === requestedUserID) {
-		return c.json({ error: "Cannot check connection status with yourself" }, 400);
+		return c.json(
+			{
+				code: "SELF_CONNECTION_ERROR",
+				success: false,
+				error: "Cannot check connection status with yourself"
+			},
+			400
+		);
 	}
 
 	const existingConnection = await database
@@ -107,7 +114,14 @@ connections.post(
 		const { requestedUserID } = c.req.valid("json");
 
 		if (userID === requestedUserID) {
-			return c.json({ error: "Cannot send connection request to yourself" }, 400);
+			return c.json(
+				{
+					code: "SELF_CONNECTION_ERROR",
+					success: false,
+					error: "Cannot send connection request to yourself"
+				},
+				400
+			);
 		}
 
 		const existing = await database
@@ -127,7 +141,14 @@ connections.post(
 		if (existing.length > 0) {
 			const conn = existing[0];
 			if (conn.status === "accepted" || conn.status === "pending") {
-				return c.json({ error: `Connection already ${conn.status}` }, 400);
+				return c.json(
+					{
+						code: `CONNECTION_ALREADY_${conn.status.toUpperCase()}`,
+						success: false,
+						error: `Connection already ${conn.status}`
+					},
+					400
+				);
 			}
 			if (conn.status === "rejected") {
 				const rejectedAt = new Date(conn.updatedAt).getTime();
@@ -136,7 +157,11 @@ connections.post(
 
 				if (now - rejectedAt < twentyFourHours) {
 					return c.json(
-						{ error: "You must wait 24 hours after a rejection before sending a new request." },
+						{
+							code: "REJECTION_COOLDOWN_ACTIVE",
+							success: false,
+							error: "You must wait 24 hours after a rejection before sending a new request."
+						},
 						400
 					);
 				}
@@ -186,7 +211,14 @@ connections.post(
 			.returning();
 
 		if (result.length === 0) {
-			return c.json({ error: "No pending connection request found from this user" }, 404);
+			return c.json(
+				{
+					code: "CONNECTION_NOT_FOUND",
+					success: false,
+					error: "No pending connection request found from this user"
+				},
+				404
+			);
 		}
 
 		return c.json({ code: "success", success: true, message: "Connection accepted" });
@@ -214,7 +246,14 @@ connections.post(
 			.returning();
 
 		if (result.length === 0) {
-			return c.json({ error: "No pending connection request found from this user" }, 404);
+			return c.json(
+				{
+					code: "CONNECTION_NOT_FOUND",
+					success: false,
+					error: "No pending connection request found from this user"
+				},
+				404
+			);
 		}
 
 		return c.json({ code: "success", success: true, message: "Connection rejected" });
@@ -226,7 +265,10 @@ connections.post("/block", requireAuth, sValidator("json", requestedUserSchema),
 	const { requestedUserID } = c.req.valid("json");
 
 	if (userID === requestedUserID) {
-		return c.json({ error: "Cannot block yourself" }, 400);
+		return c.json(
+			{ code: "SELF_BLOCK_ERROR", success: false, error: "Cannot block yourself" },
+			400
+		);
 	}
 
 	await database
