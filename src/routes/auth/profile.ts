@@ -223,8 +223,11 @@ async function handleImageUpload(c: any, type: "avatar" | "banner") {
 	try {
 		await uploadToBucket(bucketName, fileName, buffer, file.type);
 
+		// Return a fresh timestamp version token alongside the URL so client knows it updated
+		const versionToken = Date.now();
+
 		// Construct clean absolute URL endpoint path (stored clean in database for caching)
-		const fullUrl = `https://davidnet-backend.davidnet.net/auth/profile/${type}/${fileName}`;
+		const fullUrl = `https://davidnet-backend.davidnet.net/auth/profile/${type}/${fileName}?v=${versionToken}`;
 
 		const updateData =
 			type === "avatar"
@@ -232,9 +235,6 @@ async function handleImageUpload(c: any, type: "avatar" | "banner") {
 				: { bannerUrl: fullUrl, updatedAt: new Date() };
 
 		await database.update(users).set(updateData).where(eq(users.userId, userId));
-
-		// Return a fresh timestamp version token alongside the URL so client knows it updated
-		const versionToken = Date.now();
 
 		return c.json({
 			success: true,
