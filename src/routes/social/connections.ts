@@ -275,6 +275,43 @@ connections.post(
 	}
 );
 
+// POST /unconnect
+connections.post(
+	"/remove-connection",
+	requireAuth,
+	sValidator("json", requestedUserSchema),
+	async (c) => {
+		const userID = c.get("user").id;
+		const { requestedUserID } = c.req.valid("json");
+
+		const result = await database
+			.delete(userConnections)
+			.where(
+				or(
+					and(
+						eq(userConnections.senderId, userID),
+						eq(userConnections.receiverId, requestedUserID)
+					),
+					and(eq(userConnections.senderId, requestedUserID), eq(userConnections.receiverId, userID))
+				)
+			)
+			.returning();
+
+		if (result.length === 0) {
+			return c.json(
+				{
+					code: "CONNECTION_NOT_FOUND",
+					success: false,
+					error: "No active connection found with this user"
+				},
+				404
+			);
+		}
+
+		return c.json({ code: "success", success: true, message: "Connection removed" });
+	}
+);
+
 connections.post("/block", requireAuth, sValidator("json", requestedUserSchema), async (c) => {
 	const userID = c.get("user").id;
 	const { requestedUserID } = c.req.valid("json");
