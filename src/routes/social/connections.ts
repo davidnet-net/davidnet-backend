@@ -66,9 +66,19 @@ connections.get("/", requireAuth, async (c) => {
 	});
 });
 
-connections.get("/status", requireAuth, sValidator("json", requestedUserSchema), async (c) => {
+connections.get("/status", requireAuth, async (c) => {
 	const userID = c.get("user").id;
-	const { requestedUserID } = c.req.valid("json");
+	const requestedUserID = c.req.query("user");
+
+	if (!requestedUserID) {
+		return c.json(
+			{
+				code: "NO_USER_GIVEN",
+				success: false
+			},
+			400
+		);
+	}
 
 	if (userID === requestedUserID) {
 		return c.json(
