@@ -17,42 +17,76 @@ export const connections = new Hono<Env>();
 connections.get("/", requireAuth, async (c) => {
 	const userID = c.get("user").id;
 
-	// 1. Fetch all connections involving the user
+	// 1. Fetch all connections involving the user joined with user profiles
 	const allConnections = await database
-		.select()
+		.select({
+			connectionId: userConnections.id,
+			status: userConnections.status,
+			senderId: userConnections.senderId,
+			receiverId: userConnections.receiverId,
+			createdAt: userConnections.createdAt,
+			updatedAt: userConnections.updatedAt,
+			otherUser: {
+				userId: users.userId,
+				username: users.username,
+				displayName: users.displayName,
+				avatarUrl: users.avatarUrl
+			}
+		})
 		.from(userConnections)
+		.innerJoin(
+			users,
+			or(
+				and(eq(userConnections.senderId, userID), eq(users.userId, userConnections.receiverId)),
+				and(eq(userConnections.receiverId, userID), eq(users.userId, userConnections.senderId))
+			)
+		)
 		.where(or(eq(userConnections.senderId, userID), eq(userConnections.receiverId, userID)));
 
-	// 2. Fetch all blocks made by the user
-	const blocks = await database.select().from(userBlocks).where(eq(userBlocks.userId, userID));
+	// 2. Fetch all blocks made by the user joined with blocked user profiles
+	const blocks = await database
+		.select({
+			blockId: userBlocks.id,
+			createdAt: userBlocks.createdAt,
+			blockedUser: {
+				userId: users.userId,
+				username: users.username,
+				displayName: users.displayName,
+				avatarUrl: users.avatarUrl
+			}
+		})
+		.from(userBlocks)
+		.innerJoin(users, eq(userBlocks.blockedId, users.userId))
+		.where(eq(userBlocks.userId, userID));
 
 	const friends: any[] = [];
 	const incoming: any[] = [];
 	const outgoing: any[] = [];
 
-	// 3. Categorize connections based on status and sender/receiver roles
+	// 3. Categorize connections based on status and roles
 	for (const conn of allConnections) {
-		const otherUserId = conn.senderId === userID ? conn.receiverId : conn.senderId;
+		const item = {
+			connectionId: conn.connectionId,
+			user: conn.otherUser,
+			createdAt: conn.createdAt,
+			updatedAt: conn.updatedAt
+		};
 
 		if (conn.status === "accepted") {
-			friends.push({ connectionId: conn.id, userId: otherUserId, updatedAt: conn.updatedAt });
+			friends.push(item);
 		} else if (conn.status === "pending") {
 			if (conn.receiverId === userID) {
-				incoming.push({ connectionId: conn.id, userId: conn.senderId, createdAt: conn.createdAt });
+				incoming.push(item);
 			} else {
-				outgoing.push({
-					connectionId: conn.id,
-					userId: conn.receiverId,
-					createdAt: conn.createdAt
-				});
+				outgoing.push(item);
 			}
 		}
 	}
 
 	// 4. Format blocked users list
 	const blockedUsers = blocks.map((block) => ({
-		blockId: block.id,
-		userId: block.blockedId,
+		blockId: block.blockId,
+		user: block.blockedUser,
 		createdAt: block.createdAt
 	}));
 
