@@ -12,12 +12,22 @@ import { userConnections } from "../../core/database/schema/connections";
 export const profile = new Hono<Env>();
 
 profile.get("/", collectAuth, async (c) => {
-	const requestedUserId = c.req.query("user");
+	const requestedIdentifier = c.req.query("user");
 	const requestingUserId = c.get("user")?.id;
 
-	if (!requestedUserId) {
+	if (!requestedIdentifier) {
 		return c.json({ error: "Missing 'user' query parameter" }, 400);
 	}
+
+	// Simple helper regex to check if the input is a valid UUID
+	const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+	const isUuid = uuidRegex.test(requestedIdentifier);
+
+	// Conditionally build the where clause to avoid casting errors on UUID columns
+	const whereCondition = isUuid
+		? eq(users.userId, requestedIdentifier)
+		: eq(users.username, requestedIdentifier);
+
 	const result = await database
 		.select({
 			userId: users.userId,
@@ -42,7 +52,7 @@ profile.get("/", collectAuth, async (c) => {
 		.from(users)
 		.leftJoin(userPreferences, eq(users.userId, userPreferences.userId))
 		.leftJoin(userPrivacyPreferences, eq(users.userId, userPrivacyPreferences.userId))
-		.where(eq(users.userId, requestedUserId))
+		.where(whereCondition)
 		.limit(1);
 
 	const targetUser = result[0];
@@ -58,8 +68,8 @@ profile.get("/", collectAuth, async (c) => {
 			and(
 				eq(userConnections.status, "accepted"),
 				or(
-					eq(userConnections.senderId, requestedUserId),
-					eq(userConnections.receiverId, requestedUserId)
+					eq(userConnections.senderId, targetUser.userId),
+					eq(userConnections.receiverId, targetUser.userId)
 				)
 			)
 		);
