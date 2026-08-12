@@ -103,15 +103,20 @@ connections.get("/status", requireAuth, async (c) => {
 		.limit(1);
 
 	let status: "accepted" | "rejected" | "pending" | "none" = "none";
+	let isIncoming = false;
 
 	if (existingConnection.length > 0) {
 		status = existingConnection[0].status;
+		if (status === "pending" && existingConnection[0].senderId === requestedUserID) {
+			isIncoming = true;
+		}
 	}
 
 	return c.json({
 		code: "success",
 		success: true,
-		status
+		status,
+		isIncoming
 	});
 });
 
