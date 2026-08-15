@@ -5,11 +5,13 @@ import { health } from "./health";
 import { oidc } from "./oidc";
 import { exportJWK, importPKCS8 } from "jose";
 import { social } from "./social/social";
+import { workspaces } from "./workspaces/workspaces";
 
 export async function registerRoutes(app: Hono) {
 	app.route("/health", health);
 	app.route("/auth", auth);
 	app.route("/social", social);
+	app.route("/workspaces", workspaces);
 
 	app.route("/oidc", oidc);
 

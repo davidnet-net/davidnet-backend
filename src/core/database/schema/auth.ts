@@ -28,6 +28,7 @@ export const users = authSchema.table("users", {
 	email: text("email").notNull().unique(),
 	countryCode: text("country_code"),
 	location: text("location"),
+	lastActiveWorkspaceId: uuid("last_active_workspace_id"),
 	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 	updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
 });

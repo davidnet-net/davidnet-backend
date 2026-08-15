@@ -9,7 +9,8 @@ import {
 	signupStatus,
 	userPreferences,
 	userPrivacyPreferences,
-	users
+	users,
+	workspaces
 } from "../../core/database/schema/schema";
 import {
 	changeSignupEmailSchema,
@@ -99,14 +100,8 @@ signup.post(
 				}
 			}
 		} catch (e) {
-			// FAIL SIlENT: So that we dont need the HIBP for the signup
 			console.warn("[auth]: HIBP ERROR", e);
 		}
-
-		// Validation complete
-		// - username
-		// - password
-		// - email
 
 		// Hash the password
 		const password = await Bun.password.hash(data.password, {
@@ -126,6 +121,22 @@ signup.post(
 				displayName: originalUsername
 			})
 			.returning({ userID: users.userId, email: users.email });
+
+		// Create the personal workspace and return its ID
+		const workspaceInsertion = await database
+			.insert(workspaces)
+			.values({
+				ownerId: userInsertion[0].userID,
+				type: "personal",
+				name: "Personal"
+			})
+			.returning({ id: workspaces.id });
+
+		// Set the newly created workspace as the user's active workspace
+		await database
+			.update(users)
+			.set({ lastActiveWorkspaceId: workspaceInsertion[0].id })
+			.where(eq(users.userId, userInsertion[0].userID));
 
 		const signupStatusInsertion = await database
 			.insert(signupStatus)
@@ -151,7 +162,6 @@ signup.post(
 			developerAccess: false
 		});
 
-		// Send signup mail
 		sendSignupVerifyEmail(signupStatusInsertion[0].emailVerificationToken, userInsertion[0].email);
 
 		await createUserAuditLog(userInsertion[0].userID, "Account created.");
