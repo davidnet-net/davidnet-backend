@@ -13,7 +13,8 @@ export async function createUserAuditLog(userID: string, message: string) {
 			createdAt: new Date()
 		});
 
-		const shouldSendMail: boolean = !message.includes("attempt");
+		const blockedPhrases = ["attempt", "Account created."];
+		const shouldSendMail: boolean = !blockedPhrases.some((phrase) => message.includes(phrase));
 		if (shouldSendMail) {
 			// 3. Fetch the user's email from the database using the userID
 			const userRecord = await database.query.users.findFirst({
