@@ -1,12 +1,12 @@
 import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
 import { jsonb, pgSchema, uuid } from "drizzle-orm/pg-core";
 
-export const analyticsSchema = pgSchema("analytics");
+export const support = pgSchema("analytics");
 
 // --- ENUMS ---
 
 // --- TABLES ---
-export const feedback = analyticsSchema.table("feedback", {
+export const feedbackTable = support.table("feedback", {
 	feedbackId: uuid("feedback_id")
 		.primaryKey()
 		.default(sql`uuidv7()`),
@@ -14,5 +14,5 @@ export const feedback = analyticsSchema.table("feedback", {
 	data: jsonb("data").notNull()
 });
 
-export type feedback = InferSelectModel<typeof feedback>;
-export type newFeedback = InferInsertModel<typeof feedback>;
+export type feedback = InferSelectModel<typeof feedbackTable>;
+export type newFeedback = InferInsertModel<typeof feedbackTable>;
