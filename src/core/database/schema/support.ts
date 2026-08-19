@@ -1,7 +1,7 @@
 import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
 import { jsonb, pgSchema, uuid } from "drizzle-orm/pg-core";
 
-export const support = pgSchema("analytics");
+export const support = pgSchema("suppport");
 
 // --- ENUMS ---
 

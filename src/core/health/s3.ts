@@ -19,7 +19,12 @@ export async function checkS3Health(): Promise<boolean> {
 		await s3.send(new HeadBucketCommand({ Bucket: "profile-pictures" }));
 		return true;
 	} catch (error) {
-		console.error("Storage health-check failed:", error);
+		if (process.env.NODE_ENV !== "production") {
+			console.log("Silenced Garage health-check failed.", process.env.NODE_ENV);
+		} else {
+			console.error("Storage health-check failed:", error);
+		}
+
 		return false;
 	}
 }
