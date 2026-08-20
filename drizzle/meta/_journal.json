@@ -120,6 +120,13 @@
       "when": 1787152945831,
       "tag": "0016_peaceful_wonder_man",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787243458519,
+      "tag": "0017_rich_gamora",
+      "breakpoints": true
     }
   ]
 }

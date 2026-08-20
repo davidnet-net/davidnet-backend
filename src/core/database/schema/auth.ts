@@ -60,7 +60,7 @@ export const userPreferences = authSchema.table("user_preferences", {
 		.primaryKey()
 		.references(() => users.userId, { onDelete: "cascade" }),
 	theme: themeEnum("theme").default("system").notNull(),
-	language: text("language").default("en").notNull(),
+	language: text("language").default("en-us").notNull(),
 	timezone: text("timezone").default("UTC").notNull(),
 	firstDayOfWeek: text("first_day_of_week").default("monday").notNull(),
 	dateFormat: text("date_format").default("YYYY-MM-DD").notNull()

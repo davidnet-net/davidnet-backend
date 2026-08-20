@@ -7,6 +7,7 @@ import { exportJWK, importPKCS8 } from "jose";
 import { social } from "./social/social";
 import { workspaces } from "./workspaces/workspaces";
 import { support } from "./support/support";
+import { quizes } from "./quizes/quizes";
 
 export async function registerRoutes(app: Hono) {
 	app.route("/health", health);
@@ -14,6 +15,7 @@ export async function registerRoutes(app: Hono) {
 	app.route("/social", social);
 	app.route("/workspaces", workspaces);
 	app.route("/support", support);
+	app.route("/quizes", quizes);
 
 	app.route("/oidc", oidc);
 

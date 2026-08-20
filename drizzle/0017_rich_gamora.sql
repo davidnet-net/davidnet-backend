@@ -1,0 +1,1 @@
+ALTER TABLE "auth"."user_preferences" ALTER COLUMN "language" SET DEFAULT 'en-us';
