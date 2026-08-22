@@ -1,0 +1,2 @@
+ALTER TABLE "auth"."quizzes" ADD COLUMN "team_id" uuid;--> statement-breakpoint
+ALTER TABLE "auth"."quizzes" ADD CONSTRAINT "quizzes_team_id_teams_id_fk" FOREIGN KEY ("team_id") REFERENCES "auth"."teams"("id") ON DELETE cascade ON UPDATE no action;

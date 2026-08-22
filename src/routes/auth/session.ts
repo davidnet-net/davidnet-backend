@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { deleteCookie, getCookie } from "hono/cookie";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { sign, verify } from "hono/jwt";
 
 import { database } from "../../core/database/client";
@@ -68,6 +68,15 @@ session.post("/refresh", async (c) => {
 
 	const accessToken = await sign(accessTokenPayload, ACCESS_SECRET, "HS256");
 
+	// Set the access token as an HttpOnly cookie
+	setCookie(c, "access_token", accessToken, {
+		path: "/",
+		secure: process.env.NODE_ENV === "production",
+		httpOnly: true,
+		sameSite: "Lax",
+		maxAge: 15 * 60 // 15 minutes (in seconds)
+	});
+
 	return c.json({
 		accessToken,
 		userID,
@@ -80,12 +89,16 @@ session.post("/refresh", async (c) => {
 session.delete("/", async (c) => {
 	const refreshToken = getCookie(c, "refresh_token");
 
-	deleteCookie(c, "refresh_token", {
+	const cookieOptions = {
 		path: "/",
 		secure: process.env.NODE_ENV === "production",
 		httpOnly: true,
-		sameSite: "Lax"
-	});
+		sameSite: "Lax" as const // Required to satisfy TypeScript for union types
+	};
+
+	// Clear both the refresh and access cookies
+	deleteCookie(c, "refresh_token", cookieOptions);
+	deleteCookie(c, "access_token", cookieOptions);
 
 	if (!refreshToken) {
 		return c.json({ success: true, code: "LOGGED_OUT" }, 200);

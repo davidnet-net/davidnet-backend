@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { select } from "./select";
+import { access } from "./access";
 import { apps } from "./apps/apps";
 import { requireAuth } from "../../middlewares/requireAuth";
 
@@ -10,4 +11,6 @@ workspaces.use(requireAuth);
 
 // Routes (Note: Already requires auth)
 workspaces.route("/select", select);
-workspaces.route("/:workspaceId/:teamId?", apps);
+workspaces.route("/:workspaceId", apps);
+workspaces.route("/:workspaceId/teams/:teamId", apps);
+workspaces.route("/:workspaceId/access", access);

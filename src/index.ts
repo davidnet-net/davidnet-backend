@@ -1,6 +1,7 @@
 /// <reference types="bun" />
 
 import { Hono } from "hono";
+import { websocket } from "hono/bun";
 
 import { closeDbConnection } from "./core/database/client";
 import { setupNextHealthBeat, stopHealthBeat } from "./core/health/health";
@@ -8,12 +9,11 @@ import { registerMiddlewares } from "./middlewares";
 import { registerRoutes } from "./routes";
 
 const app = new Hono();
-let server: Bun.Server<undefined> | undefined = undefined;
+
+let server: ReturnType<typeof Bun.serve> | undefined = undefined;
 
 async function init() {
 	console.log("[Init]: Starting backend.");
-
-	// TODO Check ENV variables
 
 	console.log("[Init]: Starting healthBeat.");
 	setupNextHealthBeat();
@@ -27,13 +27,11 @@ async function init() {
 	console.log("[Init]: Starting server.");
 	server = Bun.serve({
 		fetch: app.fetch,
-		port: 3020
+		port: 3020,
+		websocket // Now matches the server type perfectly
 	});
 }
 
-/**
- * @param {string} signal - The OS signal received.
- */
 const handleShutdown = async (signal: string) => {
 	console.log(`[Shutdown]: Received ${signal}. Closing server...`);
 

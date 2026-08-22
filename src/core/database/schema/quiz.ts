@@ -1,7 +1,7 @@
 import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
 import { boolean, integer, text, timestamp, uuid } from "drizzle-orm/pg-core";
-import { authSchema } from "./auth";
-import { workspaces } from "./workspaces";
+import { authSchema, users } from "./auth";
+import { teams, workspaces } from "./workspaces";
 
 // --- ENUMS ---
 export const questionTypeEnum = authSchema.enum("question_type", [
@@ -31,9 +31,26 @@ export const quizzes = authSchema.table("quizzes", {
 	workspaceId: uuid("workspace_id")
 		.notNull()
 		.references(() => workspaces.id, { onDelete: "cascade" }),
+	teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
 	name: text("name").notNull(),
+	state: text("state"), // Stores the base64-encoded Yjs document state vector for persistence
 	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 	updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+});
+
+// --- QUIZ COLLABORATORS ---
+export const quizCollaborators = authSchema.table("quiz_collaborators", {
+	id: uuid("id")
+		.primaryKey()
+		.default(sql`uuidv7()`),
+	quizId: uuid("quiz_id")
+		.notNull()
+		.references(() => quizzes.id, { onDelete: "cascade" }),
+	userId: uuid("user_id")
+		.notNull()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	role: text("role").notNull(), // e.g., "editor", "viewer"
+	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
 });
 
 export const questions = authSchema.table("questions", {
@@ -116,6 +133,9 @@ export const sessionResponses = authSchema.table("session_responses", {
 // --- TYPE EXPORTS ---
 export type Quiz = InferSelectModel<typeof quizzes>;
 export type NewQuiz = InferInsertModel<typeof quizzes>;
+
+export type QuizCollaborator = InferSelectModel<typeof quizCollaborators>;
+export type NewQuizCollaborator = InferInsertModel<typeof quizCollaborators>;
 
 export type Question = InferSelectModel<typeof questions>;
 export type NewQuestion = InferInsertModel<typeof questions>;

@@ -7,6 +7,7 @@ import { exportJWK, importPKCS8 } from "jose";
 import { social } from "./social/social";
 import { workspaces } from "./workspaces/workspaces";
 import { support } from "./support/support";
+import { websockets } from "./websockets/websockets";
 
 export async function registerRoutes(app: Hono) {
 	app.route("/health", health);
@@ -15,6 +16,7 @@ export async function registerRoutes(app: Hono) {
 	app.route("/workspaces", workspaces);
 	app.route("/support", support);
 	app.route("/oidc", oidc);
+	app.route("/websockets", websockets);
 
 	app.get("/.well-known/openid-configuration", (c) => {
 		const issuer = "https://davidnet-backend.davidnet.net";

@@ -1,0 +1,1 @@
+ALTER TABLE "auth"."quizzes" ADD COLUMN "state" text;
