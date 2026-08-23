@@ -1,6 +1,12 @@
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
 import * as Y from "yjs";
+import {
+	Awareness,
+	applyAwarenessUpdate,
+	encodeAwarenessUpdate,
+	removeAwarenessStates
+} from "y-protocols/awareness";
 import { database } from "../../core/database/client";
 import {
 	quizzes,
@@ -18,8 +24,30 @@ import { getCookie } from "hono/cookie";
 const quizRooms = new Map<string, Y.Doc>();
 const roomClients = new Map<string, Set<any>>();
 const saveTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+const lastSaved = new Map<string, number>();
+
+// Awareness state tracking
+const roomAwareness = new Map<string, Awareness>();
+const clientIDsByWs = new WeakMap<any, Set<number>>();
+
+// Heartbeat tracking to detect dead connections
+const wsIsAlive = new WeakMap<any, boolean>();
 
 export const quizWs = new Hono();
+
+// Global ping interval to clean up dead connections
+setInterval(() => {
+	roomClients.forEach((clients) => {
+		for (const ws of clients) {
+			if (wsIsAlive.get(ws) === false) {
+				ws.close(1000, "Heartbeat Timeout");
+			} else {
+				wsIsAlive.set(ws, false); // Expect a Pong to set this back to true
+				ws.send(new Uint8Array([2]).buffer); // 2 = Ping
+			}
+		}
+	});
+}, 30000);
 
 async function checkAuth(token: string | undefined) {
 	if (!token) return false;
@@ -38,9 +66,6 @@ async function checkAuth(token: string | undefined) {
 	}
 }
 
-/**
- * Parses the Yjs Document, validates untrusted client data, and saves questions and options safely to PostgreSQL.
- */
 async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 	try {
 		console.log(`[Quiz DB] Persisting quiz ${quizId}...`);
@@ -84,8 +109,6 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 			}
 
 			await tx.update(quizzes).set(updatePayload).where(eq(quizzes.id, quizId));
-
-			// Deleting questions will cascade and delete old quizOptions automatically
 			await tx.delete(questions).where(eq(questions.quizId, quizId));
 
 			if (questionsArray.length > 0) {
@@ -94,27 +117,21 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 
 				questionsArray.forEach((q, index) => {
 					const rawId = q.id;
-					if (!rawId || typeof rawId !== "string" || !UUID_REGEX.test(rawId)) {
-						console.warn(`[Quiz DB] Dropping question at index ${index} due to invalid UUID.`);
-						return;
-					}
+					if (!rawId || typeof rawId !== "string" || !UUID_REGEX.test(rawId)) return;
 
 					let safeType = typeof q.type === "string" ? q.type : "quiz";
 					if (safeType === "Multiple choice") safeType = "quiz";
 					if (!VALID_TYPES.has(safeType)) safeType = "quiz";
 
 					const safeText = typeof q.text === "string" ? q.text.trim().substring(0, 250) : "";
-
 					const safeTimeLimit =
 						typeof q.timeLimit === "number" && !isNaN(q.timeLimit)
 							? Math.max(5, Math.min(q.timeLimit, 3600))
 							: 20;
-
 					const safeMultiplier =
 						typeof q.pointsMultiplier === "number" && !isNaN(q.pointsMultiplier)
 							? Math.max(0, Math.min(q.pointsMultiplier, 10))
 							: 1;
-
 					const safeIsMultiSelect = typeof q.isMultiSelect === "boolean" ? q.isMultiSelect : false;
 
 					questionsToInsert.push({
@@ -146,13 +163,11 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 				if (questionsToInsert.length > 0) {
 					await tx.insert(questions).values(questionsToInsert);
 				}
-
 				if (optionsToInsert.length > 0) {
 					await tx.insert(quizOptions).values(optionsToInsert);
 				}
 			}
 		});
-
 		console.log(`[Quiz DB] Successfully persisted quiz ${quizId}.`);
 	} catch (error) {
 		console.error(`[Quiz DB] Failed to persist quiz ${quizId}:`, error);
@@ -160,10 +175,22 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 }
 
 function scheduleSave(quizId: string, doc: Y.Doc) {
+	const now = Date.now();
+	const last = lastSaved.get(quizId) || now;
+
 	if (saveTimeouts.has(quizId)) clearTimeout(saveTimeouts.get(quizId)!);
 
+	// Force a save if 30 seconds have passed, regardless of continuous edits
+	if (now - last > 30000) {
+		persistQuizToDatabase(quizId, doc);
+		lastSaved.set(quizId, now);
+		return;
+	}
+
+	// Otherwise, debounce for 3 seconds of inactivity
 	const timeout = setTimeout(() => {
 		persistQuizToDatabase(quizId, doc);
+		lastSaved.set(quizId, Date.now());
 		saveTimeouts.delete(quizId);
 	}, 3000);
 
@@ -187,8 +214,6 @@ quizWs.get(
 		if (!quiz) return c.text("Quiz not found", 404);
 
 		let hasAccess = false;
-
-		// 1. Check direct collaborator status first
 		const [collaborator] = await database
 			.select({ id: quizCollaborators.id })
 			.from(quizCollaborators)
@@ -200,7 +225,6 @@ quizWs.get(
 		if (collaborator) {
 			hasAccess = true;
 		} else {
-			// 2. AWAIT the broader RBAC workspace/team check
 			hasAccess = await hasPermission({
 				userId: authResult.userID,
 				workspaceId: quiz.workspaceId,
@@ -213,12 +237,7 @@ quizWs.get(
 			return c.json({ error: "Forbidden: Missing required permission" }, 403);
 		}
 
-		// ==========================================
-		// Handle standard HTTP pre-flight fetch
-		// ==========================================
 		if (c.req.header("upgrade")?.toLowerCase() !== "websocket") {
-			// It's a standard HTTP GET (your pre-flight check).
-			// Since it passed the 404 and 403 checks above, return success.
 			return c.json({ success: true }, 200);
 		}
 
@@ -234,13 +253,16 @@ quizWs.get(
 					return;
 				}
 
+				wsIsAlive.set(ws, true); // Mark new connection as alive
+
 				if (!roomClients.has(quizId)) roomClients.set(quizId, new Set());
 				roomClients.get(quizId)?.add(ws);
 
 				let doc = quizRooms.get(quizId);
+				let awareness = roomAwareness.get(quizId);
+
 				if (!doc) {
 					doc = new Y.Doc();
-
 					const [quizRecord] = await database
 						.select({ state: quizzes.state, name: quizzes.name })
 						.from(quizzes)
@@ -256,16 +278,57 @@ quizWs.get(
 					if (!quizMeta.get("name") && quizRecord?.name) {
 						quizMeta.set("name", quizRecord.name);
 					}
-
 					quizRooms.set(quizId, doc);
 				}
 
-				// Send document state update prefixed with byte 0 (Doc Update)
+				if (!awareness) {
+					awareness = new Awareness(doc);
+					roomAwareness.set(quizId, awareness);
+
+					awareness.on("update", ({ added, updated, removed }: any, origin: any) => {
+						if (origin && typeof origin === "object") {
+							let ids = clientIDsByWs.get(origin);
+							if (!ids) {
+								ids = new Set();
+								clientIDsByWs.set(origin, ids);
+							}
+							added.forEach((id: number) => ids!.add(id));
+							updated.forEach((id: number) => ids!.add(id));
+						}
+
+						if (origin === "server") {
+							const clients = roomClients.get(quizId);
+							if (clients) {
+								const changedClients = [...added, ...updated, ...removed];
+								if (changedClients.length > 0) {
+									const awarenessUpdate = encodeAwarenessUpdate(awareness!, changedClients);
+									const message = new Uint8Array(1 + awarenessUpdate.length);
+									message[0] = 1;
+									message.set(awarenessUpdate, 1);
+
+									for (const client of clients) {
+										client.send(message.buffer);
+									}
+								}
+							}
+						}
+					});
+				}
+
 				const docState = Y.encodeStateAsUpdate(doc);
-				const message = new Uint8Array(1 + docState.length);
-				message[0] = 0; // Message Type 0: Document Update
-				message.set(docState, 1);
-				ws.send(message.buffer);
+				const docMessage = new Uint8Array(1 + docState.length);
+				docMessage[0] = 0;
+				docMessage.set(docState, 1);
+				ws.send(docMessage.buffer);
+
+				const awarenessStates = Array.from(awareness.getStates().keys());
+				if (awarenessStates.length > 0) {
+					const awarenessState = encodeAwarenessUpdate(awareness, awarenessStates);
+					const awarenessMessage = new Uint8Array(1 + awarenessState.length);
+					awarenessMessage[0] = 1;
+					awarenessMessage.set(awarenessState, 1);
+					ws.send(awarenessMessage.buffer);
+				}
 			},
 
 			onMessage(event, ws) {
@@ -276,15 +339,26 @@ quizWs.get(
 				const data = new Uint8Array(event.data as ArrayBuffer);
 				if (data.length === 0) return;
 
-				const messageType = data[0]; // 0 = Doc Update, 1 = Awareness Update
+				const messageType = data[0];
+
+				if (messageType === 3) {
+					// Received Pong, client is alive
+					wsIsAlive.set(ws, true);
+					return;
+				}
+
 				const payload = data.subarray(1);
 
 				if (messageType === 0) {
 					Y.applyUpdate(doc, payload);
 					scheduleSave(quizId, doc);
+				} else if (messageType === 1) {
+					const awareness = roomAwareness.get(quizId);
+					if (awareness) {
+						applyAwarenessUpdate(awareness, payload, ws);
+					}
 				}
 
-				// Relay binary update (Doc or Awareness) to all other connected peers in the room
 				const clients = roomClients.get(quizId);
 				if (clients) {
 					for (const client of clients) {
@@ -295,17 +369,29 @@ quizWs.get(
 
 			async onClose(event, ws) {
 				if (!quizId) return;
+
+				const awareness = roomAwareness.get(quizId);
+				if (awareness) {
+					const clientIDs = clientIDsByWs.get(ws);
+					if (clientIDs && clientIDs.size > 0) {
+						removeAwarenessStates(awareness, Array.from(clientIDs), "server");
+					}
+				}
+
 				const clients = roomClients.get(quizId);
 				if (clients) {
 					clients.delete(ws);
 					if (clients.size === 0) {
 						roomClients.delete(quizId);
+						roomAwareness.delete(quizId);
+
 						const doc = quizRooms.get(quizId);
 						if (doc) {
 							if (saveTimeouts.has(quizId)) {
 								clearTimeout(saveTimeouts.get(quizId)!);
 								saveTimeouts.delete(quizId);
 							}
+							lastSaved.delete(quizId); // Cleanup timestamp memory
 							await persistQuizToDatabase(quizId, doc);
 							quizRooms.delete(quizId);
 						}
