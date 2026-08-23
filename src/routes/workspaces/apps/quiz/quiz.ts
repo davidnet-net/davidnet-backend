@@ -128,11 +128,9 @@ quiz.get("/", async (c) => {
 	}
 });
 
-// --- LIST SHARED QUIZZES (Must be placed before /:quizId) ---
+/// --- LIST SHARED QUIZZES (Global across workspaces) ---
 quiz.get("/shared", async (c) => {
 	const userId = c.get("user").id;
-	const workspaceId = c.req.param("workspaceId");
-	if (!workspaceId) return c.json({ success: false }, 400);
 
 	try {
 		const sharedQuizList = await database
@@ -141,7 +139,7 @@ quiz.get("/shared", async (c) => {
 			})
 			.from(quizCollaborators)
 			.innerJoin(quizzes, eq(quizCollaborators.quizId, quizzes.id))
-			.where(and(eq(quizCollaborators.userId, userId), eq(quizzes.workspaceId, workspaceId)))
+			.where(eq(quizCollaborators.userId, userId)) // Removed workspaceId filter
 			.orderBy(desc(quizzes.createdAt));
 
 		return c.json({
