@@ -186,13 +186,9 @@ quizWs.get(
 
 		if (!quiz) return c.text("Quiz not found", 404);
 
-		const RBACResult = hasPermission({
-			userId: authResult.userID,
-			workspaceId: quiz.workspaceId,
-			teamId: quiz.teamId ?? undefined,
-			permissionKey: "quiz:edit"
-		});
+		let hasAccess = false;
 
+		// 1. Check direct collaborator status first
 		const [collaborator] = await database
 			.select({ id: quizCollaborators.id })
 			.from(quizCollaborators)
@@ -201,8 +197,29 @@ quizWs.get(
 			)
 			.limit(1);
 
-		if (!RBACResult && !collaborator) {
+		if (collaborator) {
+			hasAccess = true;
+		} else {
+			// 2. AWAIT the broader RBAC workspace/team check
+			hasAccess = await hasPermission({
+				userId: authResult.userID,
+				workspaceId: quiz.workspaceId,
+				teamId: quiz.teamId ?? undefined,
+				permissionKey: "quiz:edit"
+			});
+		}
+
+		if (!hasAccess) {
 			return c.json({ error: "Forbidden: Missing required permission" }, 403);
+		}
+
+		// ==========================================
+		// Handle standard HTTP pre-flight fetch
+		// ==========================================
+		if (c.req.header("upgrade")?.toLowerCase() !== "websocket") {
+			// It's a standard HTTP GET (your pre-flight check).
+			// Since it passed the 404 and 403 checks above, return success.
+			return c.json({ success: true }, 200);
 		}
 
 		await next();
