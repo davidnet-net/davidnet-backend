@@ -1,0 +1,1 @@
+ALTER TABLE "auth"."questions" ADD COLUMN "is_multi_select" boolean DEFAULT false NOT NULL;

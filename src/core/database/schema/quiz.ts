@@ -65,7 +65,8 @@ export const questions = authSchema.table("questions", {
 	type: questionTypeEnum("type").default("quiz").notNull(),
 	position: integer("position").notNull(),
 	timeLimit: integer("time_limit").default(20).notNull(), // Countdown in seconds
-	pointsMultiplier: integer("points_multiplier").default(1).notNull() // 1x for scored quizzes, 0 for polls
+	pointsMultiplier: integer("points_multiplier").default(1).notNull(), // 1x for scored quizzes, 0 for polls
+	isMultiSelect: boolean("is_multi_select").default(false).notNull() // <--- Added isMultiSelect
 });
 
 export const quizOptions = authSchema.table("quiz_options", {

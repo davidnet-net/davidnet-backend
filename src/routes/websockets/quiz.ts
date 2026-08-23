@@ -7,7 +7,8 @@ import {
 	quizCollaborators,
 	questions,
 	quizOptions,
-	type NewQuestion
+	type NewQuestion,
+	type NewQuizOption
 } from "../../core/database/schema/quiz";
 import { eq, and } from "drizzle-orm";
 import { hasPermission } from "../../core/shared/checkPermissions";
@@ -38,7 +39,7 @@ async function checkAuth(token: string | undefined) {
 }
 
 /**
- * Parses the Yjs Document, validates untrusted client data, and saves to the database safely.
+ * Parses the Yjs Document, validates untrusted client data, and saves questions and options safely to PostgreSQL.
  */
 async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 	try {
@@ -49,7 +50,6 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 
 		const quizMeta = doc.getMap<string>("quizMeta");
 
-		// 1. Validate Quiz Name (Only update if Yjs actually contains a name, preventing accidental overwrites)
 		const rawQuizName = quizMeta.get("name");
 		const safeQuizName =
 			typeof rawQuizName === "string" && rawQuizName.trim().length > 0
@@ -61,7 +61,6 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 			.toArray()
 			.map((q) => q.toJSON());
 
-		// 2. Validation Constants
 		const VALID_TYPES = new Set([
 			"quiz",
 			"true_false",
@@ -76,7 +75,6 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 		const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 		await database.transaction(async (tx) => {
-			// Build update payload dynamically so we don't overwrite the title if it wasn't modified in Yjs
 			const updatePayload: any = {
 				state: base64State,
 				updatedAt: new Date()
@@ -87,22 +85,25 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 
 			await tx.update(quizzes).set(updatePayload).where(eq(quizzes.id, quizId));
 
+			// Deleting questions will cascade and delete old quizOptions automatically
 			await tx.delete(questions).where(eq(questions.quizId, quizId));
 
 			if (questionsArray.length > 0) {
-				// 3. Sanitize Data Pipeline
-				const questionsToInsert = questionsArray.reduce<NewQuestion[]>((acc, q, index) => {
+				const questionsToInsert: NewQuestion[] = [];
+				const optionsToInsert: NewQuizOption[] = [];
+
+				questionsArray.forEach((q, index) => {
 					const rawId = q.id;
 					if (!rawId || typeof rawId !== "string" || !UUID_REGEX.test(rawId)) {
 						console.warn(`[Quiz DB] Dropping question at index ${index} due to invalid UUID.`);
-						return acc;
+						return;
 					}
 
 					let safeType = typeof q.type === "string" ? q.type : "quiz";
 					if (safeType === "Multiple choice") safeType = "quiz";
 					if (!VALID_TYPES.has(safeType)) safeType = "quiz";
 
-					const safeText = typeof q.text === "string" ? q.text.trim().substring(0, 5000) : "";
+					const safeText = typeof q.text === "string" ? q.text.trim().substring(0, 250) : "";
 
 					const safeTimeLimit =
 						typeof q.timeLimit === "number" && !isNaN(q.timeLimit)
@@ -114,21 +115,42 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 							? Math.max(0, Math.min(q.pointsMultiplier, 10))
 							: 1;
 
-					acc.push({
+					// Extract safe isMultiSelect boolean
+					const safeIsMultiSelect = typeof q.isMultiSelect === "boolean" ? q.isMultiSelect : false;
+
+					questionsToInsert.push({
 						id: rawId,
 						quizId: quizId,
 						text: safeText,
 						type: safeType as NewQuestion["type"],
 						position: index,
 						timeLimit: safeTimeLimit,
-						pointsMultiplier: safeMultiplier
+						pointsMultiplier: safeMultiplier,
+						isMultiSelect: safeIsMultiSelect // <--- Persisted here
 					});
 
-					return acc;
-				}, []);
+					// Extract and validate options if they exist
+					if (Array.isArray(q.options)) {
+						q.options.forEach((opt: any, optIndex: number) => {
+							const optText = typeof opt.text === "string" ? opt.text.trim().substring(0, 100) : "";
+							optionsToInsert.push({
+								id: opt.id && UUID_REGEX.test(opt.id) ? opt.id : crypto.randomUUID(),
+								questionId: rawId,
+								text: optText,
+								isCorrect: !!opt.isCorrect,
+								color: typeof opt.color === "string" ? opt.color : "red",
+								position: optIndex
+							});
+						});
+					}
+				});
 
 				if (questionsToInsert.length > 0) {
 					await tx.insert(questions).values(questionsToInsert);
+				}
+
+				if (optionsToInsert.length > 0) {
+					await tx.insert(quizOptions).values(optionsToInsert);
 				}
 			}
 		});
@@ -204,7 +226,6 @@ quizWs.get(
 				if (!doc) {
 					doc = new Y.Doc();
 
-					// Fetch state and original quiz name from database
 					const [quizRecord] = await database
 						.select({ state: quizzes.state, name: quizzes.name })
 						.from(quizzes)
@@ -216,7 +237,6 @@ quizWs.get(
 						Y.applyUpdate(doc, binaryUpdate);
 					}
 
-					// Ensure Yjs metadata map knows the title from the database if not already set
 					const quizMeta = doc.getMap<string>("quizMeta");
 					if (!quizMeta.get("name") && quizRecord?.name) {
 						quizMeta.set("name", quizRecord.name);
