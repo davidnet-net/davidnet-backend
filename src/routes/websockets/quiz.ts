@@ -115,7 +115,6 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 							? Math.max(0, Math.min(q.pointsMultiplier, 10))
 							: 1;
 
-					// Extract safe isMultiSelect boolean
 					const safeIsMultiSelect = typeof q.isMultiSelect === "boolean" ? q.isMultiSelect : false;
 
 					questionsToInsert.push({
@@ -126,10 +125,9 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 						position: index,
 						timeLimit: safeTimeLimit,
 						pointsMultiplier: safeMultiplier,
-						isMultiSelect: safeIsMultiSelect // <--- Persisted here
+						isMultiSelect: safeIsMultiSelect
 					});
 
-					// Extract and validate options if they exist
 					if (Array.isArray(q.options)) {
 						q.options.forEach((opt: any, optIndex: number) => {
 							const optText = typeof opt.text === "string" ? opt.text.trim().substring(0, 100) : "";
@@ -245,7 +243,12 @@ quizWs.get(
 					quizRooms.set(quizId, doc);
 				}
 
-				ws.send(Y.encodeStateAsUpdate(doc) as Uint8Array<ArrayBuffer>);
+				// Send document state update prefixed with byte 0 (Doc Update)
+				const docState = Y.encodeStateAsUpdate(doc);
+				const message = new Uint8Array(1 + docState.length);
+				message[0] = 0; // Message Type 0: Document Update
+				message.set(docState, 1);
+				ws.send(message.buffer);
 			},
 
 			onMessage(event, ws) {
@@ -253,14 +256,22 @@ quizWs.get(
 				const doc = quizRooms.get(quizId);
 				if (!doc) return;
 
-				const update = new Uint8Array(event.data as ArrayBuffer);
-				Y.applyUpdate(doc, update);
-				scheduleSave(quizId, doc);
+				const data = new Uint8Array(event.data as ArrayBuffer);
+				if (data.length === 0) return;
 
+				const messageType = data[0]; // 0 = Doc Update, 1 = Awareness Update
+				const payload = data.subarray(1);
+
+				if (messageType === 0) {
+					Y.applyUpdate(doc, payload);
+					scheduleSave(quizId, doc);
+				}
+
+				// Relay binary update (Doc or Awareness) to all other connected peers in the room
 				const clients = roomClients.get(quizId);
 				if (clients) {
 					for (const client of clients) {
-						if (client !== ws) client.send(update);
+						if (client !== ws) client.send(data);
 					}
 				}
 			},
