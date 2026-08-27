@@ -23,6 +23,12 @@ export const sessionStatusEnum = authSchema.enum("session_status", [
 	"finished"
 ]);
 
+export const requestStatusEnum = authSchema.enum("request_status", [
+	"pending",
+	"accepted",
+	"declined"
+]);
+
 // --- TABLES ---
 export const quizzes = authSchema.table("quizzes", {
 	id: uuid("id")
@@ -129,6 +135,23 @@ export const sessionResponses = authSchema.table("session_responses", {
 	answerTimeMs: integer("answer_time_ms").notNull(), // Used for speed-based scoring
 	pointsEarned: integer("points_earned").default(0).notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
+});
+
+export const collaborationRequests = authSchema.table("collaboration_requests", {
+	id: uuid("id")
+		.primaryKey()
+		.default(sql`uuidv7()`),
+	quizId: uuid("quiz_id")
+		.notNull()
+		.references(() => quizzes.id, { onDelete: "cascade" }),
+	inviterId: uuid("inviter_id")
+		.notNull()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	email: text("email").notNull(), // The external user's email address
+	role: text("role").notNull(), // e.g., "editor", "viewer" - matches what they get upon accepting
+	status: requestStatusEnum("status").default("pending").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	expiresAt: timestamp("expires_at", { withTimezone: true }) // Optional: Auto-expire old requests
 });
 
 // --- TYPE EXPORTS ---

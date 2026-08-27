@@ -10,7 +10,7 @@ services:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - ./volumes/pgdata:/var/lib/postgresql/data
+      - ./volumes/pgdata:/var/lib/postgresql
     restart: unless-stopped
 
   adminer:
