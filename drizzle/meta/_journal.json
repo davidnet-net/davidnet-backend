@@ -169,6 +169,20 @@
       "when": 1787477943658,
       "tag": "0023_blue_banshee",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1788458438467,
+      "tag": "0024_right_zeigeist",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1788459536498,
+      "tag": "0025_absurd_wraith",
+      "breakpoints": true
     }
   ]
 }

@@ -9,6 +9,5 @@ export const updateQuizSchema = type({
 });
 
 export const addCollaboratorSchema = type({
-	userId: "string",
-	role: "string"
+	userId: "string"
 });

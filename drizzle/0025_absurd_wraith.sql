@@ -1,0 +1,1 @@
+ALTER TABLE "auth"."quiz_collaborators" ADD COLUMN "status" "auth"."request_status" DEFAULT 'pending' NOT NULL;

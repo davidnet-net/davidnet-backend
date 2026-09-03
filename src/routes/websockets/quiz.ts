@@ -26,24 +26,25 @@ const roomClients = new Map<string, Set<any>>();
 const saveTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 const lastSaved = new Map<string, number>();
 
-// Awareness state tracking
 const roomAwareness = new Map<string, Awareness>();
 const clientIDsByWs = new WeakMap<any, Set<number>>();
-
-// Heartbeat tracking to detect dead connections
+const wsCanManage = new WeakMap<any, boolean>();
 const wsIsAlive = new WeakMap<any, boolean>();
 
-export const quizWs = new Hono();
+export const quizWs = new Hono<{
+	Variables: {
+		canManage: boolean;
+	};
+}>();
 
-// Global ping interval to clean up dead connections
 setInterval(() => {
 	roomClients.forEach((clients) => {
 		for (const ws of clients) {
 			if (wsIsAlive.get(ws) === false) {
 				ws.close(1000, "Heartbeat Timeout");
 			} else {
-				wsIsAlive.set(ws, false); // Expect a Pong to set this back to true
-				ws.send(new Uint8Array([2]).buffer); // 2 = Ping
+				wsIsAlive.set(ws, false);
+				ws.send(new Uint8Array([2]).buffer);
 			}
 		}
 	});
@@ -68,11 +69,8 @@ async function checkAuth(token: string | undefined) {
 
 async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 	try {
-		console.log(`[Quiz DB] Persisting quiz ${quizId}...`);
-
 		const stateVector = Y.encodeStateAsUpdate(doc);
 		const base64State = Buffer.from(stateVector).toString("base64");
-
 		const quizMeta = doc.getMap<string>("quizMeta");
 
 		const rawQuizName = quizMeta.get("name");
@@ -168,7 +166,6 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 				}
 			}
 		});
-		console.log(`[Quiz DB] Successfully persisted quiz ${quizId}.`);
 	} catch (error) {
 		console.error(`[Quiz DB] Failed to persist quiz ${quizId}:`, error);
 	}
@@ -180,14 +177,12 @@ function scheduleSave(quizId: string, doc: Y.Doc) {
 
 	if (saveTimeouts.has(quizId)) clearTimeout(saveTimeouts.get(quizId)!);
 
-	// Force a save if 30 seconds have passed, regardless of continuous edits
 	if (now - last > 30000) {
 		persistQuizToDatabase(quizId, doc);
 		lastSaved.set(quizId, now);
 		return;
 	}
 
-	// Otherwise, debounce for 3 seconds of inactivity
 	const timeout = setTimeout(() => {
 		persistQuizToDatabase(quizId, doc);
 		lastSaved.set(quizId, Date.now());
@@ -214,24 +209,41 @@ quizWs.get(
 		if (!quiz) return c.text("Quiz not found", 404);
 
 		let hasAccess = false;
+		let canManage = false;
+
 		const [collaborator] = await database
 			.select({ id: quizCollaborators.id })
 			.from(quizCollaborators)
 			.where(
-				and(eq(quizCollaborators.quizId, quizId), eq(quizCollaborators.userId, authResult.userID))
+				and(
+					eq(quizCollaborators.quizId, quizId),
+					eq(quizCollaborators.userId, authResult.userID),
+					eq(quizCollaborators.status, "accepted")
+				)
 			)
 			.limit(1);
 
 		if (collaborator) {
 			hasAccess = true;
-		} else {
-			hasAccess = await hasPermission({
-				userId: authResult.userID,
-				workspaceId: quiz.workspaceId,
-				teamId: quiz.teamId ?? undefined,
-				permissionKey: "quiz:edit"
-			});
 		}
+
+		const hasWorkspaceEdit = await hasPermission({
+			userId: authResult.userID,
+			workspaceId: quiz.workspaceId,
+			teamId: quiz.teamId ?? undefined,
+			permissionKey: "quiz:edit"
+		});
+
+		if (hasWorkspaceEdit) {
+			hasAccess = true;
+		}
+
+		canManage = await hasPermission({
+			userId: authResult.userID,
+			workspaceId: quiz.workspaceId,
+			teamId: quiz.teamId ?? undefined,
+			permissionKey: "quiz:manage"
+		});
 
 		if (!hasAccess) {
 			return c.json({ error: "Forbidden: Missing required permission" }, 403);
@@ -241,10 +253,13 @@ quizWs.get(
 			return c.json({ success: true }, 200);
 		}
 
+		c.set("canManage", canManage);
+
 		await next();
 	},
 	upgradeWebSocket((c) => {
 		const quizId = c.req.param("quizId");
+		const canManage = c.get("canManage") ?? false;
 
 		return {
 			async onOpen(event, ws) {
@@ -253,7 +268,8 @@ quizWs.get(
 					return;
 				}
 
-				wsIsAlive.set(ws, true); // Mark new connection as alive
+				wsIsAlive.set(ws, true);
+				wsCanManage.set(ws, canManage);
 
 				if (!roomClients.has(quizId)) roomClients.set(quizId, new Set());
 				roomClients.get(quizId)?.add(ws);
@@ -264,7 +280,12 @@ quizWs.get(
 				if (!doc) {
 					doc = new Y.Doc();
 					const [quizRecord] = await database
-						.select({ state: quizzes.state, name: quizzes.name })
+						.select({
+							state: quizzes.state,
+							name: quizzes.name,
+							teamId: quizzes.teamId,
+							workspaceId: quizzes.workspaceId
+						})
 						.from(quizzes)
 						.where(eq(quizzes.id, quizId))
 						.limit(1);
@@ -277,6 +298,12 @@ quizWs.get(
 					const quizMeta = doc.getMap<string>("quizMeta");
 					if (!quizMeta.get("name") && quizRecord?.name) {
 						quizMeta.set("name", quizRecord.name);
+					}
+					if (!quizMeta.get("teamId") && quizRecord?.teamId) {
+						quizMeta.set("teamId", quizRecord.teamId);
+					}
+					if (!quizMeta.get("workspaceId") && quizRecord?.workspaceId) {
+						quizMeta.set("workspaceId", quizRecord.workspaceId);
 					}
 					quizRooms.set(quizId, doc);
 				}
@@ -342,7 +369,6 @@ quizWs.get(
 				const messageType = data[0];
 
 				if (messageType === 3) {
-					// Received Pong, client is alive
 					wsIsAlive.set(ws, true);
 					return;
 				}
@@ -350,7 +376,39 @@ quizWs.get(
 				const payload = data.subarray(1);
 
 				if (messageType === 0) {
-					Y.applyUpdate(doc, payload);
+					const userCanManage = wsCanManage.get(ws) ?? false;
+					let quizMetaSnapshot: Map<string, any> | null = null;
+					const quizMeta = doc.getMap<string>("quizMeta");
+
+					if (!userCanManage) {
+						quizMetaSnapshot = new Map(quizMeta.entries());
+					}
+
+					Y.applyUpdate(doc, payload, ws);
+
+					if (!userCanManage && quizMetaSnapshot) {
+						let mutated = false;
+						quizMeta.forEach((val, key) => {
+							if (quizMetaSnapshot!.get(key) !== val) {
+								mutated = true;
+							}
+						});
+						quizMetaSnapshot.forEach((val, key) => {
+							if (quizMeta.get(key) !== val) {
+								mutated = true;
+							}
+						});
+
+						if (mutated) {
+							doc.transact(() => {
+								quizMetaSnapshot!.forEach((val, key) => {
+									quizMeta.set(key, val);
+								});
+							}, "server");
+							return;
+						}
+					}
+
 					scheduleSave(quizId, doc);
 				} else if (messageType === 1) {
 					const awareness = roomAwareness.get(quizId);
@@ -391,7 +449,7 @@ quizWs.get(
 								clearTimeout(saveTimeouts.get(quizId)!);
 								saveTimeouts.delete(quizId);
 							}
-							lastSaved.delete(quizId); // Cleanup timestamp memory
+							lastSaved.delete(quizId);
 							await persistQuizToDatabase(quizId, doc);
 							quizRooms.delete(quizId);
 						}

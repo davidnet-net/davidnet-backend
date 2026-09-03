@@ -55,7 +55,7 @@ export const quizCollaborators = authSchema.table("quiz_collaborators", {
 	userId: uuid("user_id")
 		.notNull()
 		.references(() => users.userId, { onDelete: "cascade" }),
-	role: text("role").notNull(), // e.g., "editor", "viewer"
+	status: requestStatusEnum("status").default("pending").notNull(), // <-- Enforces pending status by default
 	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
 });
 
@@ -148,7 +148,6 @@ export const collaborationRequests = authSchema.table("collaboration_requests", 
 		.notNull()
 		.references(() => users.userId, { onDelete: "cascade" }),
 	email: text("email").notNull(), // The external user's email address
-	role: text("role").notNull(), // e.g., "editor", "viewer" - matches what they get upon accepting
 	status: requestStatusEnum("status").default("pending").notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 	expiresAt: timestamp("expires_at", { withTimezone: true }) // Optional: Auto-expire old requests

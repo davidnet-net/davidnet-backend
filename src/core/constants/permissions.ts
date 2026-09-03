@@ -2,7 +2,8 @@ export const SYSTEM_PERMISSIONS = [
 	// Quiz Management
 	{ key: "quiz:create" },
 	{ key: "quiz:list" },
-	{ key: "quiz:read" },
+	{ key: "quiz:present" },
+	{ key: "quiz:manage" },
 	{ key: "quiz:edit" },
 	{ key: "quiz:delete" },
 
