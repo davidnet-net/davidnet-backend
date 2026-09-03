@@ -143,9 +143,12 @@ profile.patch("/", requireAuth, async (c) => {
 		}
 	}
 
-	// 3. Handle remaining allowed fields safely
+	// 3. Handle remaining allowed fields safely with validation
 	if (body.displayName !== undefined) {
 		if (typeof body.displayName === "string" && body.displayName.trim().length > 0) {
+			if (body.displayName.length > 35) {
+				return c.json({ success: false, code: "DISPLAY_NAME_TOO_LONG" }, 400);
+			}
 			userUpdates.displayName = body.displayName.trim();
 		} else {
 			return c.json({ success: false, code: "INVALID_DISPLAY_NAME" }, 400);
@@ -153,7 +156,17 @@ profile.patch("/", requireAuth, async (c) => {
 	}
 
 	if (body.location !== undefined) {
-		userUpdates.location = body.location ? body.location : null;
+		if (body.location !== null) {
+			if (typeof body.location !== "string") {
+				return c.json({ success: false, code: "INVALID_LOCATION_TYPE" }, 400);
+			}
+			if (body.location.length > 50) {
+				return c.json({ success: false, code: "LOCATION_TOO_LONG" }, 400);
+			}
+			userUpdates.location = body.location;
+		} else {
+			userUpdates.location = null;
+		}
 	}
 
 	// Preferences table fields
