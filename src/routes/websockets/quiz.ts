@@ -76,7 +76,7 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 		const rawQuizName = quizMeta.get("name");
 		const safeQuizName =
 			typeof rawQuizName === "string" && rawQuizName.trim().length > 0
-				? rawQuizName.trim().substring(0, 255)
+				? rawQuizName.trim().substring(0, 500)
 				: null;
 
 		const questionsArray = doc
@@ -121,7 +121,7 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 					if (safeType === "Multiple choice") safeType = "quiz";
 					if (!VALID_TYPES.has(safeType)) safeType = "quiz";
 
-					const safeText = typeof q.text === "string" ? q.text.trim().substring(0, 250) : "";
+					const safeText = typeof q.text === "string" ? q.text.trim().substring(0, 500) : "";
 					const safeTimeLimit =
 						typeof q.timeLimit === "number" && !isNaN(q.timeLimit)
 							? Math.max(5, Math.min(q.timeLimit, 3600))
@@ -145,7 +145,7 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 
 					if (Array.isArray(q.options)) {
 						q.options.forEach((opt: any, optIndex: number) => {
-							const optText = typeof opt.text === "string" ? opt.text.trim().substring(0, 100) : "";
+							const optText = typeof opt.text === "string" ? opt.text.trim().substring(0, 500) : "";
 							optionsToInsert.push({
 								id: opt.id && UUID_REGEX.test(opt.id) ? opt.id : crypto.randomUUID(),
 								questionId: rawId,
