@@ -67,6 +67,56 @@ async function checkAuth(token: string | undefined) {
 	}
 }
 
+// Checkt en handhaaft hard de 500-karakter limiet in het YJS document
+function enforceTextLimits(doc: Y.Doc) {
+	doc.transact(() => {
+		const quizMeta = doc.getMap<string>("quizMeta");
+		const name = quizMeta.get("name");
+		if (typeof name === "string" && name.length > 500) {
+			quizMeta.set("name", name.substring(0, 500));
+		}
+
+		const questionsList = doc.getArray<Y.Map<any>>("questions");
+		questionsList.forEach((q) => {
+			if (q instanceof Y.Map) {
+				const text = q.get("text");
+				if (typeof text === "string" && text.length > 500) {
+					q.set("text", text.substring(0, 500));
+				}
+
+				const options = q.get("options");
+				if (Array.isArray(options)) {
+					let changed = false;
+					const newOptions = options.map((opt: any) => {
+						if (
+							opt !== null &&
+							typeof opt === "object" &&
+							typeof opt.text === "string" &&
+							opt.text.length > 500
+						) {
+							changed = true;
+							return { ...opt, text: opt.text.substring(0, 500) };
+						}
+						return opt;
+					});
+					if (changed) {
+						q.set("options", newOptions);
+					}
+				} else if (options instanceof Y.Array) {
+					options.forEach((opt: any) => {
+						if (opt instanceof Y.Map) {
+							const optText = opt.get("text");
+							if (typeof optText === "string" && optText.length > 500) {
+								opt.set("text", optText.substring(0, 500));
+							}
+						}
+					});
+				}
+			}
+		});
+	}, "server"); // De 'origin' wordt op 'server' gezet zodat we dit kunnen herkennen
+}
+
 async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 	try {
 		const stateVector = Y.encodeStateAsUpdate(doc);
@@ -279,6 +329,23 @@ quizWs.get(
 
 				if (!doc) {
 					doc = new Y.Doc();
+
+					// Belangrijk: Zend acties en correcties van de server door naar alle verbonden clients
+					doc.on("update", (update: Uint8Array, origin: any) => {
+						if (origin === "server") {
+							const updateMessage = new Uint8Array(1 + update.length);
+							updateMessage[0] = 0;
+							updateMessage.set(update, 1);
+
+							const clients = roomClients.get(quizId);
+							if (clients) {
+								for (const client of clients) {
+									client.send(updateMessage.buffer);
+								}
+							}
+						}
+					});
+
 					const [quizRecord] = await database
 						.select({
 							state: quizzes.state,
@@ -386,6 +453,15 @@ quizWs.get(
 
 					Y.applyUpdate(doc, payload, ws);
 
+					// Eerst de binnengekomen wijziging direct doorsturen
+					const clients = roomClients.get(quizId);
+					if (clients) {
+						for (const client of clients) {
+							if (client !== ws) client.send(data);
+						}
+					}
+
+					// Controleer op niet-toegestane bewerkingen door clients zonder permissies
 					if (!userCanManage && quizMetaSnapshot) {
 						let mutated = false;
 						quizMeta.forEach((val, key) => {
@@ -400,14 +476,17 @@ quizWs.get(
 						});
 
 						if (mutated) {
+							// De 'server' origin zorgt dat alle clients hiervan een update krijgen in de doc.on("update") event listener
 							doc.transact(() => {
 								quizMetaSnapshot!.forEach((val, key) => {
 									quizMeta.set(key, val);
 								});
 							}, "server");
-							return;
 						}
 					}
+
+					// Forceer 500-karakters harde limieten voor alle string fields
+					enforceTextLimits(doc);
 
 					scheduleSave(quizId, doc);
 				} else if (messageType === 1) {
@@ -415,12 +494,12 @@ quizWs.get(
 					if (awareness) {
 						applyAwarenessUpdate(awareness, payload, ws);
 					}
-				}
 
-				const clients = roomClients.get(quizId);
-				if (clients) {
-					for (const client of clients) {
-						if (client !== ws) client.send(data);
+					const clients = roomClients.get(quizId);
+					if (clients) {
+						for (const client of clients) {
+							if (client !== ws) client.send(data);
+						}
 					}
 				}
 			},
