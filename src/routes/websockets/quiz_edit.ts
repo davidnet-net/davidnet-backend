@@ -31,7 +31,7 @@ const clientIDsByWs = new WeakMap<any, Set<number>>();
 const wsCanManage = new WeakMap<any, boolean>();
 const wsIsAlive = new WeakMap<any, boolean>();
 
-export const quizWs = new Hono<{
+export const editWs = new Hono<{
 	Variables: {
 		canManage: boolean;
 	};
@@ -242,7 +242,7 @@ function scheduleSave(quizId: string, doc: Y.Doc) {
 	saveTimeouts.set(quizId, timeout);
 }
 
-quizWs.get(
+editWs.get(
 	"/:quizId",
 	async (c, next) => {
 		const quizId = c.req.param("quizId");

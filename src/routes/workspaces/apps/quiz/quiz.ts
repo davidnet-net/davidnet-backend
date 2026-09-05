@@ -391,6 +391,12 @@ quiz.post(
 	async (c) => {
 		const data = c.req.valid("json");
 		const quizId = c.req.param("quizId");
+		const currentUserId = c.get("user").id; // Get the logged-in user
+
+		// Prevent inviting yourself
+		if (data.userId === currentUserId) {
+			return c.json({ success: false, code: "CANNOT_INVITE_SELF" }, 400);
+		}
 
 		try {
 			const [existing] = await database
