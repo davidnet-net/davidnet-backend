@@ -192,7 +192,7 @@ presentWs.get(
 			});
 		}
 
-		if (!hasAccess) return c.json({ error: "Forbidden: Missing presentation permission" }, 403);
+		if (!hasAccess) return c.json({ code: "NO_PERMS" }, 403);
 
 		const quizQuestions = await database
 			.select()
@@ -200,7 +200,7 @@ presentWs.get(
 			.where(eq(questions.quizId, quizId));
 
 		if (quizQuestions.length === 0) {
-			return c.json({ error: "Cannot present a quiz with no questions." }, 400);
+			return c.json({ code: "NO_QUESTIONS" }, 400);
 		}
 
 		const quizOpts = await database
@@ -224,10 +224,7 @@ presentWs.get(
 		for (const q of quizQuestions) {
 			const opts = optionsByQuestion.get(q.id) || [];
 			if (isQuestionInvalid(q, opts)) {
-				return c.json(
-					{ error: `Question ${q.position + 1} is invalid. Please fix it before presenting.` },
-					400
-				);
+				return c.json({ code: `QUESTION_INVALID` }, 400);
 			}
 		}
 
