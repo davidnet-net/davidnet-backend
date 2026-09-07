@@ -11,22 +11,34 @@ function sanitizeValue(value: unknown): unknown {
 		return value.map(sanitizeValue);
 	}
 	if (value !== null && typeof value === "object") {
-		return Object.fromEntries(Object.entries(value).map(([key, val]) => [key, sanitizeValue(val)]));
+		return Object.fromEntries(
+			Object.entries(value).map(([key, val]) => [sanitizeValue(key) as string, sanitizeValue(val)])
+		);
 	}
 	return value;
 }
 
 export const sanitizeUnicode = createMiddleware(async (c, next) => {
-	const contentType = c.req.header("content-type");
+	const contentType = c.req.header("content-type") || "";
 
-	if (contentType?.includes("application/json")) {
+	if (contentType.includes("application/json")) {
 		try {
 			const rawBody = await c.req.json();
 			const cleanedBody = sanitizeValue(rawBody);
-
 			c.req.json = async <T = any>(): Promise<T> => cleanedBody as T;
 		} catch {
-			// Allow malformed JSON to pass to default Hono handlers
+			// Pass through malformed JSON
+		}
+	} else if (
+		contentType.includes("application/x-www-form-urlencoded") ||
+		contentType.includes("multipart/form-data")
+	) {
+		try {
+			const rawBody = await c.req.parseBody();
+			const cleanedBody = sanitizeValue(rawBody) as Record<string, string | File>;
+			c.req.parseBody = async () => cleanedBody;
+		} catch {
+			// Pass through if parsing fails
 		}
 	}
 
