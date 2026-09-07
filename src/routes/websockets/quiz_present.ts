@@ -16,6 +16,7 @@ import { hasPermission } from "../../core/shared/checkPermissions";
 import { verify } from "hono/jwt";
 import { getCookie } from "hono/cookie";
 import { kickParticipant, wsByParticipant, terminateSessionPlayers } from "./quiz_play";
+import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
 
 type PresenterConnection = {
 	ws: any;
@@ -304,7 +305,8 @@ presentWs.get(
 
 			async onMessage(event, ws) {
 				try {
-					const data = JSON.parse(event.data.toString());
+					const rawData = JSON.parse(event.data.toString());
+					const data = sanitizeValue(rawData) as any;
 
 					if (data.type === "PONG") {
 						const cid = data.connectionId;

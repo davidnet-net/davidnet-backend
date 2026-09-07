@@ -5,6 +5,7 @@ import { database } from "../../core/database/client";
 import { quizSessions, sessionParticipants } from "../../core/database/schema/quiz";
 import { eq } from "drizzle-orm";
 import { broadcastToPresenters } from "./quiz_present";
+import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
 
 type PlayerConnection = {
 	ws: any;
@@ -169,7 +170,6 @@ function handleSocketDisconnection(participantId: string, sessionId: string, con
 
 	if (disconnectGracePeriods.has(participantId)) return;
 
-	// Grace period lowered to 7 seconds to quickly kick users who close the tab
 	const timeout = setTimeout(async () => {
 		disconnectGracePeriods.delete(participantId);
 		const activeConn = wsByParticipant.get(participantId);
@@ -261,7 +261,8 @@ playWs.get(
 
 			async onMessage(event, ws) {
 				try {
-					const data = JSON.parse(event.data.toString());
+					const rawData = JSON.parse(event.data.toString());
+					const data = sanitizeValue(rawData) as any;
 
 					if (data.type === "PONG") {
 						const pid = data.participantId;
@@ -279,7 +280,9 @@ playWs.get(
 					}
 
 					if (data.type === "JOIN_NICKNAME") {
-						const nickname = typeof data.nickname === "string" ? data.nickname.trim() : "";
+						const rawNickname = typeof data.nickname === "string" ? data.nickname.trim() : "";
+						const nickname = (sanitizeValue(rawNickname) as string).trim();
+
 						if (!nickname || nickname.length > 35) {
 							ws.send(
 								JSON.stringify({

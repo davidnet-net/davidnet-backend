@@ -1,3 +1,4 @@
+// src/websockets/quiz_edit.ts
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
 import * as Y from "yjs";
@@ -20,6 +21,7 @@ import { eq, and } from "drizzle-orm";
 import { hasPermission } from "../../core/shared/checkPermissions";
 import { verify } from "hono/jwt";
 import { getCookie } from "hono/cookie";
+import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
 
 const quizRooms = new Map<string, Y.Doc>();
 const roomClients = new Map<string, Set<any>>();
@@ -67,35 +69,36 @@ async function checkAuth(token: string | undefined) {
 	}
 }
 
-// Checkt en handhaaft hard de 500-karakter limiet in het YJS document
 function enforceTextLimits(doc: Y.Doc) {
 	doc.transact(() => {
 		const quizMeta = doc.getMap<string>("quizMeta");
 		const name = quizMeta.get("name");
-		if (typeof name === "string" && name.length > 500) {
-			quizMeta.set("name", name.substring(0, 500));
+		if (typeof name === "string") {
+			const cleaned = sanitizeValue(name) as string;
+			if (cleaned.length > 500) {
+				quizMeta.set("name", cleaned.substring(0, 500));
+			} else {
+				quizMeta.set("name", cleaned);
+			}
 		}
 
 		const questionsList = doc.getArray<Y.Map<any>>("questions");
 		questionsList.forEach((q) => {
 			if (q instanceof Y.Map) {
 				const text = q.get("text");
-				if (typeof text === "string" && text.length > 500) {
-					q.set("text", text.substring(0, 500));
+				if (typeof text === "string") {
+					const cleaned = sanitizeValue(text) as string;
+					q.set("text", cleaned.substring(0, 500));
 				}
 
 				const options = q.get("options");
 				if (Array.isArray(options)) {
 					let changed = false;
 					const newOptions = options.map((opt: any) => {
-						if (
-							opt !== null &&
-							typeof opt === "object" &&
-							typeof opt.text === "string" &&
-							opt.text.length > 500
-						) {
+						if (opt !== null && typeof opt === "object" && typeof opt.text === "string") {
 							changed = true;
-							return { ...opt, text: opt.text.substring(0, 500) };
+							const cleaned = sanitizeValue(opt.text) as string;
+							return { ...opt, text: cleaned.substring(0, 500) };
 						}
 						return opt;
 					});
@@ -106,15 +109,16 @@ function enforceTextLimits(doc: Y.Doc) {
 					options.forEach((opt: any) => {
 						if (opt instanceof Y.Map) {
 							const optText = opt.get("text");
-							if (typeof optText === "string" && optText.length > 500) {
-								opt.set("text", optText.substring(0, 500));
+							if (typeof optText === "string") {
+								const cleaned = sanitizeValue(optText) as string;
+								opt.set("text", cleaned.substring(0, 500));
 							}
 						}
 					});
 				}
 			}
 		});
-	}, "server"); // De 'origin' wordt op 'server' gezet zodat we dit kunnen herkennen
+	}, "server");
 }
 
 async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
@@ -126,7 +130,7 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 		const rawQuizName = quizMeta.get("name");
 		const safeQuizName =
 			typeof rawQuizName === "string" && rawQuizName.trim().length > 0
-				? rawQuizName.trim().substring(0, 500)
+				? (sanitizeValue(rawQuizName) as string).trim().substring(0, 500)
 				: null;
 
 		const questionsArray = doc
@@ -171,7 +175,10 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 					if (safeType === "Multiple choice") safeType = "quiz";
 					if (!VALID_TYPES.has(safeType)) safeType = "quiz";
 
-					const safeText = typeof q.text === "string" ? q.text.trim().substring(0, 500) : "";
+					const safeText =
+						typeof q.text === "string"
+							? (sanitizeValue(q.text) as string).trim().substring(0, 500)
+							: "";
 					const safeTimeLimit =
 						typeof q.timeLimit === "number" && !isNaN(q.timeLimit)
 							? Math.max(5, Math.min(q.timeLimit, 3600))
@@ -195,7 +202,10 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 
 					if (Array.isArray(q.options)) {
 						q.options.forEach((opt: any, optIndex: number) => {
-							const optText = typeof opt.text === "string" ? opt.text.trim().substring(0, 500) : "";
+							const optText =
+								typeof opt.text === "string"
+									? (sanitizeValue(opt.text) as string).trim().substring(0, 500)
+									: "";
 							optionsToInsert.push({
 								id: opt.id && UUID_REGEX.test(opt.id) ? opt.id : crypto.randomUUID(),
 								questionId: rawId,
@@ -330,7 +340,6 @@ editWs.get(
 				if (!doc) {
 					doc = new Y.Doc();
 
-					// Belangrijk: Zend acties en correcties van de server door naar alle verbonden clients
 					doc.on("update", (update: Uint8Array, origin: any) => {
 						if (origin === "server") {
 							const updateMessage = new Uint8Array(1 + update.length);
@@ -364,7 +373,7 @@ editWs.get(
 
 					const quizMeta = doc.getMap<string>("quizMeta");
 					if (!quizMeta.get("name") && quizRecord?.name) {
-						quizMeta.set("name", quizRecord.name);
+						quizMeta.set("name", sanitizeValue(quizRecord.name) as string);
 					}
 					if (!quizMeta.get("teamId") && quizRecord?.teamId) {
 						quizMeta.set("teamId", quizRecord.teamId);
@@ -453,7 +462,6 @@ editWs.get(
 
 					Y.applyUpdate(doc, payload, ws);
 
-					// Eerst de binnengekomen wijziging direct doorsturen
 					const clients = roomClients.get(quizId);
 					if (clients) {
 						for (const client of clients) {
@@ -461,7 +469,6 @@ editWs.get(
 						}
 					}
 
-					// Controleer op niet-toegestane bewerkingen door clients zonder permissies
 					if (!userCanManage && quizMetaSnapshot) {
 						let mutated = false;
 						quizMeta.forEach((val, key) => {
@@ -476,7 +483,6 @@ editWs.get(
 						});
 
 						if (mutated) {
-							// De 'server' origin zorgt dat alle clients hiervan een update krijgen in de doc.on("update") event listener
 							doc.transact(() => {
 								quizMetaSnapshot!.forEach((val, key) => {
 									quizMeta.set(key, val);
@@ -485,9 +491,7 @@ editWs.get(
 						}
 					}
 
-					// Forceer 500-karakters harde limieten voor alle string fields
 					enforceTextLimits(doc);
-
 					scheduleSave(quizId, doc);
 				} else if (messageType === 1) {
 					const awareness = roomAwareness.get(quizId);

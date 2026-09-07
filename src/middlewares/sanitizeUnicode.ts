@@ -1,6 +1,6 @@
 import { createMiddleware } from "hono/factory";
 
-function sanitizeValue(value: unknown): unknown {
+export function sanitizeValue(value: unknown): unknown {
 	if (typeof value === "string") {
 		return value
 			.normalize("NFC")
