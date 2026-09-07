@@ -86,6 +86,7 @@ export function broadcastToPresenters(sessionId: string, message: any) {
 export const presentWs = new Hono<{
 	Variables: {
 		session: QuizSession;
+		quizName: string;
 	};
 }>();
 
@@ -162,7 +163,12 @@ presentWs.get(
 		if (!authResult) return c.text("Unauthorized", 401);
 
 		const [quiz] = await database
-			.select({ id: quizzes.id, teamId: quizzes.teamId, workspaceId: quizzes.workspaceId })
+			.select({
+				id: quizzes.id,
+				name: quizzes.name,
+				teamId: quizzes.teamId,
+				workspaceId: quizzes.workspaceId
+			})
 			.from(quizzes)
 			.where(eq(quizzes.id, quizId))
 			.limit(1);
@@ -245,14 +251,19 @@ presentWs.get(
 			.returning();
 
 		if (c.req.header("upgrade")?.toLowerCase() !== "websocket") {
-			return c.json({ success: true, sessionId: session.id, pinCode: session.pinCode }, 200);
+			return c.json(
+				{ success: true, sessionId: session.id, pinCode: session.pinCode, quizName: quiz.name },
+				200
+			);
 		}
 
 		c.set("session", session);
+		c.set("quizName", quiz.name);
 		await next();
 	},
 	upgradeWebSocket((c) => {
 		const session = c.get("session");
+		const quizName = c.get("quizName");
 		const sessionId = session.id;
 
 		return {
@@ -288,6 +299,7 @@ presentWs.get(
 							sessionId: session.id,
 							pinCode: session.pinCode,
 							locked: session.locked,
+							quizName,
 							connectionId,
 							players: currentParticipants.map((p) => {
 								const playerConn = wsByParticipant.get(p.id);
@@ -343,7 +355,8 @@ presentWs.get(
 							payload: {
 								sessionId: session.id,
 								pinCode: session.pinCode,
-								locked: isLocked
+								locked: isLocked,
+								quizName
 							}
 						});
 					} else if (data.type === "REMOVE_PLAYER") {
