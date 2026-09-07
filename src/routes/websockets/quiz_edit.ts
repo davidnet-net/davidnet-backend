@@ -69,36 +69,35 @@ async function checkAuth(token: string | undefined) {
 	}
 }
 
+// Alleen inkorten op lengte, niet ongevraagd normale letters mollen
 function enforceTextLimits(doc: Y.Doc) {
 	doc.transact(() => {
 		const quizMeta = doc.getMap<string>("quizMeta");
 		const name = quizMeta.get("name");
-		if (typeof name === "string") {
-			const cleaned = sanitizeValue(name) as string;
-			if (cleaned.length > 500) {
-				quizMeta.set("name", cleaned.substring(0, 500));
-			} else {
-				quizMeta.set("name", cleaned);
-			}
+		if (typeof name === "string" && name.length > 500) {
+			quizMeta.set("name", name.substring(0, 500));
 		}
 
 		const questionsList = doc.getArray<Y.Map<any>>("questions");
 		questionsList.forEach((q) => {
 			if (q instanceof Y.Map) {
 				const text = q.get("text");
-				if (typeof text === "string") {
-					const cleaned = sanitizeValue(text) as string;
-					q.set("text", cleaned.substring(0, 500));
+				if (typeof text === "string" && text.length > 500) {
+					q.set("text", text.substring(0, 500));
 				}
 
 				const options = q.get("options");
 				if (Array.isArray(options)) {
 					let changed = false;
 					const newOptions = options.map((opt: any) => {
-						if (opt !== null && typeof opt === "object" && typeof opt.text === "string") {
+						if (
+							opt !== null &&
+							typeof opt === "object" &&
+							typeof opt.text === "string" &&
+							opt.text.length > 500
+						) {
 							changed = true;
-							const cleaned = sanitizeValue(opt.text) as string;
-							return { ...opt, text: cleaned.substring(0, 500) };
+							return { ...opt, text: opt.text.substring(0, 500) };
 						}
 						return opt;
 					});
@@ -109,9 +108,8 @@ function enforceTextLimits(doc: Y.Doc) {
 					options.forEach((opt: any) => {
 						if (opt instanceof Y.Map) {
 							const optText = opt.get("text");
-							if (typeof optText === "string") {
-								const cleaned = sanitizeValue(optText) as string;
-								opt.set("text", cleaned.substring(0, 500));
+							if (typeof optText === "string" && optText.length > 500) {
+								opt.set("text", optText.substring(0, 500));
 							}
 						}
 					});
@@ -373,7 +371,7 @@ editWs.get(
 
 					const quizMeta = doc.getMap<string>("quizMeta");
 					if (!quizMeta.get("name") && quizRecord?.name) {
-						quizMeta.set("name", sanitizeValue(quizRecord.name) as string);
+						quizMeta.set("name", quizRecord.name);
 					}
 					if (!quizMeta.get("teamId") && quizRecord?.teamId) {
 						quizMeta.set("teamId", quizRecord.teamId);

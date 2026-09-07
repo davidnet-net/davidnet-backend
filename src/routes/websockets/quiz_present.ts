@@ -29,7 +29,7 @@ export const activePresenters = new Map<string, Set<PresenterConnection>>();
 const hostDisconnectGracePeriods = new Map<string, ReturnType<typeof setTimeout>>();
 
 const HOST_HEARTBEAT_TICK_MS = 5000;
-const HOST_DEAD_MISSED_TICKS = 12; // Allow up to 12 misses (60 seconds)
+const HOST_DEAD_MISSED_TICKS = 12;
 
 const GLOBAL_HOST_INTERVAL_KEY = "__quiz_host_heartbeat_interval__";
 if ((globalThis as any)[GLOBAL_HOST_INTERVAL_KEY]) {
@@ -68,7 +68,7 @@ if ((globalThis as any)[GLOBAL_HOST_INTERVAL_KEY]) {
 					terminateSessionPlayers(sessionId, "The host disconnected. Presentation ended.");
 					activePresenters.delete(sessionId);
 				}
-			}, 15000); // 15 seconds grace period for the host to reload the tab
+			}, 15000);
 			hostDisconnectGracePeriods.set(sessionId, timeout);
 		}
 	});
