@@ -146,10 +146,20 @@ profile.patch("/", requireAuth, async (c) => {
 	// 3. Handle remaining allowed fields safely with validation
 	if (body.displayName !== undefined) {
 		if (typeof body.displayName === "string" && body.displayName.trim().length > 0) {
-			if (body.displayName.length > 35) {
+			const trimmedName = body.displayName.trim();
+
+			if (trimmedName.length > 35) {
 				return c.json({ success: false, code: "DISPLAY_NAME_TOO_LONG" }, 400);
 			}
-			userUpdates.displayName = body.displayName.trim();
+
+			// Allow letters (including international accents), numbers, spaces, underscores, dots, and hyphens
+			// Reject emojis, symbols, and special characters
+			const validNameRegex = /^[\p{L}\p{N} _.-]+$/u;
+			if (!validNameRegex.test(trimmedName)) {
+				return c.json({ success: false, code: "INVALID_DISPLAY_NAME_CHARACTERS" }, 400);
+			}
+
+			userUpdates.displayName = trimmedName;
 		} else {
 			return c.json({ success: false, code: "INVALID_DISPLAY_NAME" }, 400);
 		}
