@@ -8,13 +8,17 @@ export function sanitizeValue(value: unknown): unknown {
 
 		return (
 			truncated
+				// 1. Splits tekens los zodat gestapelde accenten apart geteld kunnen worden
+				.normalize("NFD")
+				// 2. Verwijder alleen gestapelde accenten (2 of meer op rij), maar laat 1 accent staan
+				.replace(/(\p{M}){2,}/gu, "")
+				// 3. Breng geaccepteerde accenten weer netjes samen (e + ́ wordt weer é)
 				.normalize("NFC")
-				// Behoud alleen West-Europese tekens, cijfers, basistekens ÉN emojis
-				// Dit verwijdert automatisch onbekende/exotische schriften (zoals Sinhala, Thais, etc.)
+				// 4. Behoud alleen schone West-Europese tekens, cijfers, basistekens ÉN emojis
 				.replace(/[^\na-zA-Z0-9\u00C0-\u024F _.-–—,!?@#%&*()+'":;\p{Extended_Pictographic}]/gu, "")
-				// Strips onzichtbare stuurtekens (behalve de Joiner die emojis soms samenvoegt)
+				// Strips onzichtbare stuurtekens
 				.replace(/[\u200E\u200F\u202E\uFEFF\u2060-\u206F]/g, "")
-				// Strips ASCII control characters (behalve newlines en tabs)
+				// Strips ASCII control characters
 				.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
 		);
 	}
