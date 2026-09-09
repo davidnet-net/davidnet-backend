@@ -45,11 +45,13 @@ if ((globalThis as any)[GLOBAL_HOST_INTERVAL_KEY]) {
 				deadConns.add(conn);
 				continue;
 			}
-			conn.ws.send(JSON.stringify({ type: "PING" }));
+
 			conn.missedPongs++;
 
 			if (conn.missedPongs >= HOST_DEAD_MISSED_TICKS) {
 				deadConns.add(conn);
+			} else {
+				conn.ws.send(JSON.stringify({ type: "PING" }));
 			}
 		}
 
@@ -157,6 +159,7 @@ presentWs.get(
 	"/:quizId",
 	async (c, next) => {
 		const quizId = c.req.param("quizId");
+		const reqSessionId = c.req.query("sessionId");
 		const token = getCookie(c, "access_token");
 
 		const authResult = await checkAuth(token);
@@ -235,20 +238,39 @@ presentWs.get(
 			}
 		}
 
-		await database
-			.delete(quizSessions)
-			.where(and(eq(quizSessions.quizId, quizId), eq(quizSessions.status, "lobby")));
+		let session: QuizSession | undefined;
 
-		const pinCode = await generateUniquePin();
-		const [session] = await database
-			.insert(quizSessions)
-			.values({
-				quizId,
-				pinCode,
-				status: "lobby",
-				locked: false
-			})
-			.returning();
+		if (reqSessionId) {
+			const [existingById] = await database
+				.select()
+				.from(quizSessions)
+				.where(and(eq(quizSessions.id, reqSessionId), eq(quizSessions.quizId, quizId)))
+				.limit(1);
+			if (existingById) session = existingById;
+		}
+
+		if (!session) {
+			const [existingLobby] = await database
+				.select()
+				.from(quizSessions)
+				.where(and(eq(quizSessions.quizId, quizId), eq(quizSessions.status, "lobby")))
+				.limit(1);
+			if (existingLobby) session = existingLobby;
+		}
+
+		if (!session) {
+			const pinCode = await generateUniquePin();
+			const [newSession] = await database
+				.insert(quizSessions)
+				.values({
+					quizId,
+					pinCode,
+					status: "lobby",
+					locked: false
+				})
+				.returning();
+			session = newSession;
+		}
 
 		if (c.req.header("upgrade")?.toLowerCase() !== "websocket") {
 			return c.json(
@@ -266,13 +288,14 @@ presentWs.get(
 		const quizName = c.get("quizName");
 		const sessionId = session.id;
 
+		let connectionId = crypto.randomUUID();
+
 		return {
 			async onOpen(event, ws) {
 				if (!activePresenters.has(sessionId)) {
 					activePresenters.set(sessionId, new Set());
 				}
 
-				const connectionId = crypto.randomUUID();
 				const presenterConn: PresenterConnection = {
 					ws,
 					sessionId,
@@ -321,13 +344,10 @@ presentWs.get(
 					const data = sanitizeValue(rawData) as any;
 
 					if (data.type === "PONG") {
-						const cid = data.connectionId;
-						if (!cid) return;
-
 						const presenters = activePresenters.get(sessionId);
 						if (presenters) {
 							for (const conn of presenters) {
-								if (conn.connectionId === cid) {
+								if (conn.connectionId === connectionId) {
 									conn.missedPongs = 0;
 									break;
 								}
@@ -338,6 +358,7 @@ presentWs.get(
 
 					if (data.type === "STOP_SESSION") {
 						await terminateSessionPlayers(sessionId, "The host stopped the presentation.");
+						await database.delete(quizSessions).where(eq(quizSessions.id, sessionId));
 						activePresenters.delete(sessionId);
 						return;
 					}
@@ -379,25 +400,30 @@ presentWs.get(
 			},
 
 			onClose(event, ws) {
-				activePresenters.forEach((presenters, sid) => {
+				const presenters = activePresenters.get(sessionId);
+				if (presenters) {
 					for (const conn of presenters) {
-						if (conn.ws === ws || conn.ws.raw === ws || (ws as any).raw === conn.ws) {
+						if (conn.connectionId === connectionId) {
 							presenters.delete(conn);
 
-							if (presenters.size === 0 && !hostDisconnectGracePeriods.has(sid)) {
+							if (presenters.size === 0 && !hostDisconnectGracePeriods.has(sessionId)) {
 								const timeout = setTimeout(() => {
-									hostDisconnectGracePeriods.delete(sid);
-									const currentHosts = activePresenters.get(sid);
+									hostDisconnectGracePeriods.delete(sessionId);
+									const currentHosts = activePresenters.get(sessionId);
 									if (!currentHosts || currentHosts.size === 0) {
-										terminateSessionPlayers(sid, "The host disconnected. Presentation ended.");
-										activePresenters.delete(sid);
+										terminateSessionPlayers(
+											sessionId,
+											"The host disconnected. Presentation ended."
+										);
+										activePresenters.delete(sessionId);
 									}
 								}, 15000);
-								hostDisconnectGracePeriods.set(sid, timeout);
+								hostDisconnectGracePeriods.set(sessionId, timeout);
 							}
+							break;
 						}
 					}
-				});
+				}
 			}
 		};
 	})

@@ -253,7 +253,7 @@ async function handleImageUpload(c: any, type: "avatar" | "banner") {
 		return c.json({ success: false, code: "MISSING_IMAGE_FILE" }, 400);
 	}
 
-	const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/avif"];
+	const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/avif", "image/gif"];
 	if (!allowedTypes.includes(file.type)) {
 		return c.json({ success: false, code: "INVALID_FILE_TYPE" }, 400);
 	}

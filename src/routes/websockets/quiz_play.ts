@@ -11,7 +11,6 @@ type PlayerConnection = {
 	ws: any;
 	sessionId: string;
 	participantId: string;
-	tickAge: number;
 	missedPongs: number;
 	connectionId: string;
 };
@@ -41,7 +40,6 @@ export const blockedNicknamesBySession = state.blockedNicknamesBySession;
 const disconnectGracePeriods = state.disconnectGracePeriods;
 
 const HEARTBEAT_TICK_MS = 5000;
-const INITIAL_GRACE_TICKS = 3;
 const FAILING_MISSED_TICKS = 3;
 const DEAD_MISSED_TICKS = 6;
 
@@ -60,22 +58,18 @@ if ((globalThis as any)[GLOBAL_INTERVAL_KEY]) {
 				return;
 			}
 
-			conn.ws.send(JSON.stringify({ type: "PING" }));
-
-			conn.tickAge += 1;
-			if (conn.tickAge <= INITIAL_GRACE_TICKS) {
-				return;
-			}
-
 			conn.missedPongs += 1;
 
 			if (conn.missedPongs >= DEAD_MISSED_TICKS) {
 				deadSockets.push(conn);
 			} else {
-				broadcastToPresenters(conn.sessionId, {
-					type: "PLAYER_HEALTH_UPDATE",
-					payload: { id: participantId, failingHeartbeat: conn.missedPongs >= FAILING_MISSED_TICKS }
-				});
+				if (conn.missedPongs >= FAILING_MISSED_TICKS) {
+					broadcastToPresenters(conn.sessionId, {
+						type: "PLAYER_HEALTH_UPDATE",
+						payload: { id: participantId, failingHeartbeat: true }
+					});
+				}
+				conn.ws.send(JSON.stringify({ type: "PING" }));
 			}
 		} catch (err) {
 			deadSockets.push(conn);
@@ -176,7 +170,7 @@ function handleSocketDisconnection(participantId: string, sessionId: string, con
 		if (!activeConn || activeConn.connectionId === connectionId) {
 			await terminateParticipant(participantId, sessionId);
 		}
-	}, 7000);
+	}, 15000);
 
 	disconnectGracePeriods.set(participantId, timeout);
 }
@@ -207,7 +201,6 @@ playWs.get(
 	"/:pin",
 	async (c, next) => {
 		const pin = c.req.param("pin");
-		const participantId = c.req.query("participantId");
 
 		if (!pin || pin.length !== 6) {
 			return c.json({ error: "Invalid PIN format" }, 400);
@@ -223,24 +216,12 @@ playWs.get(
 			return c.json({ error: "Quiz not found or invalid PIN" }, 404);
 		}
 
-		if (session.locked) {
+		if (session.locked && !c.req.query("participantId")) {
 			return c.json({ error: "This quiz session is locked by the host." }, 403);
 		}
 
 		if (session.status !== "lobby") {
 			return c.json({ error: "This quiz has already started or finished." }, 403);
-		}
-
-		if (participantId) {
-			const [participant] = await database
-				.select()
-				.from(sessionParticipants)
-				.where(eq(sessionParticipants.id, participantId))
-				.limit(1);
-
-			if (!participant && !disconnectGracePeriods.has(participantId)) {
-				return c.json({ error: "You have been removed from the session." }, 403);
-			}
 		}
 
 		if (c.req.header("upgrade")?.toLowerCase() !== "websocket") {
@@ -254,27 +235,28 @@ playWs.get(
 		const session = c.get("session");
 		const sessionId = session.id;
 
-		return {
-			onOpen(event, ws) {
-				(ws as any).connectionId = crypto.randomUUID();
-			},
+		// Closures bound to this specific WebSocket connection
+		let connectionId = crypto.randomUUID();
+		let participantId: string | null = null;
 
+		return {
 			async onMessage(event, ws) {
 				try {
 					const rawData = JSON.parse(event.data.toString());
 					const data = sanitizeValue(rawData) as any;
 
 					if (data.type === "PONG") {
-						const pid = data.participantId;
-						if (!pid) return;
-
-						const conn = wsByParticipant.get(pid);
-						if (conn) {
-							conn.missedPongs = 0;
-							broadcastToPresenters(conn.sessionId, {
-								type: "PLAYER_HEALTH_UPDATE",
-								payload: { id: pid, failingHeartbeat: false }
-							});
+						if (participantId) {
+							const conn = wsByParticipant.get(participantId);
+							if (conn && conn.connectionId === connectionId) {
+								if (conn.missedPongs >= FAILING_MISSED_TICKS) {
+									broadcastToPresenters(sessionId, {
+										type: "PLAYER_HEALTH_UPDATE",
+										payload: { id: participantId, failingHeartbeat: false }
+									});
+								}
+								conn.missedPongs = 0;
+							}
 						}
 						return;
 					}
@@ -290,6 +272,9 @@ playWs.get(
 									message: "Nickname must be between 1 and 35 characters."
 								})
 							);
+							try {
+								ws.close(4000);
+							} catch {}
 							return;
 						}
 
@@ -301,38 +286,56 @@ playWs.get(
 									message: "This nickname has been blocked by the host."
 								})
 							);
-							ws.close(4001, "Blocked");
+							try {
+								ws.close(4001, "Blocked");
+							} catch {}
 							return;
 						}
 
-						let participantId = data.participantId;
+						let pId = data.participantId;
 						let participant: any;
 
-						if (participantId) {
+						if (pId) {
 							const [existingParticipant] = await database
 								.select()
 								.from(sessionParticipants)
-								.where(eq(sessionParticipants.id, participantId))
+								.where(eq(sessionParticipants.id, pId))
 								.limit(1);
 
 							if (existingParticipant) {
 								participant = existingParticipant;
 
-								if (disconnectGracePeriods.has(participantId)) {
-									clearTimeout(disconnectGracePeriods.get(participantId)!);
-									disconnectGracePeriods.delete(participantId);
+								if (disconnectGracePeriods.has(pId)) {
+									clearTimeout(disconnectGracePeriods.get(pId)!);
+									disconnectGracePeriods.delete(pId);
 								}
 
-								const oldConn = wsByParticipant.get(participantId);
-								if (oldConn && oldConn.ws && oldConn.connectionId !== (ws as any).connectionId) {
+								const oldConn = wsByParticipant.get(pId);
+								if (oldConn && oldConn.ws && oldConn.connectionId !== connectionId) {
 									try {
 										oldConn.ws.close(4000, "Superseded by new connection");
 									} catch {}
 								}
+							} else if (!disconnectGracePeriods.has(pId)) {
+								ws.send(
+									JSON.stringify({ type: "KICKED", message: "You were removed from the session." })
+								);
+								try {
+									ws.close(4001, "Removed");
+								} catch {}
+								return;
 							}
 						}
 
 						if (!participant) {
+							if (session.locked) {
+								ws.send(JSON.stringify({ type: "ERROR", message: "Session is locked." }));
+								try {
+									ws.close(4000);
+								} catch {}
+								return;
+							}
+
 							const existingParticipants = await database
 								.select()
 								.from(sessionParticipants)
@@ -344,7 +347,7 @@ playWs.get(
 								)
 							) {
 								ws.send(JSON.stringify({ type: "ERROR", message: "Nickname is already taken." }));
-								return;
+								return; // Allow retry
 							}
 
 							const [newParticipant] = await database
@@ -354,33 +357,37 @@ playWs.get(
 							participant = newParticipant;
 						}
 
-						(ws as any).participantId = participant.id;
-						(ws as any).sessionId = sessionId;
+						participantId = participant.id;
 
-						wsByParticipant.set(participant.id, {
+						if (!participantId) {
+							console.warn("participantId is undefined quiz_play");
+							return;
+						}
+
+						wsByParticipant.set(participantId, {
 							ws,
 							sessionId,
-							participantId: participant.id,
-							tickAge: 0,
+							participantId,
 							missedPongs: 0,
-							connectionId: (ws as any).connectionId
+							connectionId
 						});
 
 						broadcastToPresenters(sessionId, {
 							type: "PLAYER_HEALTH_UPDATE",
-							payload: { id: participant.id, failingHeartbeat: false }
+							payload: { id: participantId, failingHeartbeat: false }
 						});
 
 						ws.send(
 							JSON.stringify({
 								type: "JOINED_SUCCESS",
-								payload: { id: participant.id, nickname: participant.nickname }
+								payload: { id: participantId, nickname: participant.nickname }
 							})
 						);
+
 						broadcastToPresenters(sessionId, {
 							type: "PLAYER_JOINED",
 							payload: {
-								id: participant.id,
+								id: participantId,
 								nickname: participant.nickname,
 								failingHeartbeat: false
 							}
@@ -392,24 +399,20 @@ playWs.get(
 			},
 
 			async onClose(event, ws) {
-				const pid = (ws as any).participantId;
-				const sid = (ws as any).sessionId || sessionId;
-				const cid = (ws as any).connectionId;
-
-				if (pid && cid) {
-					const activeConn = wsByParticipant.get(pid);
-					if (activeConn && activeConn.connectionId !== cid) {
+				if (participantId) {
+					const activeConn = wsByParticipant.get(participantId);
+					if (activeConn && activeConn.connectionId !== connectionId) {
 						return;
 					}
 
 					if (event.code === 4000) return;
 
 					if (event.code === 1000 || event.code === 4001) {
-						await terminateParticipant(pid, sid);
+						await terminateParticipant(participantId, sessionId);
 						return;
 					}
 
-					handleSocketDisconnection(pid, sid, cid);
+					handleSocketDisconnection(participantId, sessionId, connectionId);
 				}
 			}
 		};
