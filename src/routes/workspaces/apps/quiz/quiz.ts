@@ -22,6 +22,12 @@ import { hasPermission } from "../../../../core/shared/checkPermissions";
 
 export const quiz = new Hono<Env>();
 
+// Helper to normalize user IDs (handles UUID hyphens, casing, and whitespace)
+const normalizeId = (id: string | number | undefined | null): string => {
+	if (!id) return "";
+	return String(id).replace(/-/g, "").toLowerCase().trim();
+};
+
 // --- CREATE QUIZ ---
 quiz.post(
 	"/create",
@@ -211,7 +217,7 @@ quiz.get("/", async (c) => {
 	}
 });
 
-/// --- LIST SHARED QUIZZES (Global across workspaces) ---
+// --- LIST SHARED QUIZZES (Global across workspaces) ---
 quiz.get("/shared", async (c) => {
 	const userId = c.get("user").id;
 
@@ -391,10 +397,10 @@ quiz.post(
 	async (c) => {
 		const data = c.req.valid("json");
 		const quizId = c.req.param("quizId");
-		const currentUserId = c.get("user").id; // Get the logged-in user
+		const currentUserId = c.get("user")?.id;
 
-		// Prevent inviting yourself
-		if (data.userId === currentUserId) {
+		// Prevent inviting yourself regardless of hyphenation or string casing differences
+		if (normalizeId(data.userId) === normalizeId(currentUserId)) {
 			return c.json({ success: false, code: "CANNOT_INVITE_SELF" }, 400);
 		}
 
