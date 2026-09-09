@@ -1,4 +1,3 @@
-// src/websockets/quiz_play.ts
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
 import { database } from "../../core/database/client";
@@ -26,13 +25,15 @@ if (!(globalThis as any)[GLOBAL_STATE_KEY]) {
 	(globalThis as any)[GLOBAL_STATE_KEY] = {
 		wsByParticipant: new Map<string, PlayerConnection>(),
 		blockedNicknamesBySession: new Map<string, Set<string>>(),
-		disconnectGracePeriods: new Map<string, ReturnType<typeof setTimeout>>()
+		disconnectGracePeriods: new Map<string, ReturnType<typeof setTimeout>>(),
+		activeQuestionsBySession: new Map<string, any>()
 	};
 }
 const state = (globalThis as any)[GLOBAL_STATE_KEY] as {
 	wsByParticipant: Map<string, PlayerConnection>;
 	blockedNicknamesBySession: Map<string, Set<string>>;
 	disconnectGracePeriods: Map<string, ReturnType<typeof setTimeout>>;
+	activeQuestionsBySession: Map<string, any>;
 };
 
 export const wsByParticipant = state.wsByParticipant;
@@ -85,6 +86,15 @@ if ((globalThis as any)[GLOBAL_INTERVAL_KEY]) {
 		handleSocketDisconnection(conn.participantId, conn.sessionId, conn.connectionId);
 	}
 }, HEARTBEAT_TICK_MS);
+
+export function broadcastToSessionPlayers(sessionId: string, message: any) {
+	const msgStr = JSON.stringify(message);
+	wsByParticipant.forEach((conn) => {
+		if (conn.sessionId === sessionId && conn.ws.readyState === 1) {
+			conn.ws.send(msgStr);
+		}
+	});
+}
 
 export async function terminateParticipant(participantId: string, sessionId: string) {
 	if (!wsByParticipant.has(participantId) && !disconnectGracePeriods.has(participantId)) return;
@@ -220,8 +230,8 @@ playWs.get(
 			return c.json({ error: "This quiz session is locked by the host." }, 403);
 		}
 
-		if (session.status !== "lobby") {
-			return c.json({ error: "This quiz has already started or finished." }, 403);
+		if (session.status === "finished") {
+			return c.json({ error: "This quiz has already finished." }, 403);
 		}
 
 		if (c.req.header("upgrade")?.toLowerCase() !== "websocket") {
@@ -235,7 +245,6 @@ playWs.get(
 		const session = c.get("session");
 		const sessionId = session.id;
 
-		// Closures bound to this specific WebSocket connection
 		let connectionId = crypto.randomUUID();
 		let participantId: string | null = null;
 
@@ -347,7 +356,7 @@ playWs.get(
 								)
 							) {
 								ws.send(JSON.stringify({ type: "ERROR", message: "Nickname is already taken." }));
-								return; // Allow retry
+								return;
 							}
 
 							const [newParticipant] = await database
@@ -360,7 +369,7 @@ playWs.get(
 						participantId = participant.id;
 
 						if (!participantId) {
-							console.warn("participantId is undefined quiz_play");
+							console.warn("participantId quiz_play undefined!");
 							return;
 						}
 
@@ -392,6 +401,19 @@ playWs.get(
 								failingHeartbeat: false
 							}
 						});
+
+						// Sync active question state for late-joining players
+						const activeQ = state.activeQuestionsBySession?.get(sessionId);
+						if (activeQ) {
+							ws.send(
+								JSON.stringify({
+									type: activeQ.type,
+									serverTime: activeQ.serverTime,
+									durationMs: activeQ.durationMs,
+									payload: activeQ.payload
+								})
+							);
+						}
 					}
 				} catch (err) {
 					console.error("[Quiz Player WS] Error handling message:", err);

@@ -1,4 +1,3 @@
-// src/websockets/quiz_present.ts
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
 import { database } from "../../core/database/client";
@@ -15,7 +14,12 @@ import { eq, and, inArray } from "drizzle-orm";
 import { hasPermission } from "../../core/shared/checkPermissions";
 import { verify } from "hono/jwt";
 import { getCookie } from "hono/cookie";
-import { kickParticipant, wsByParticipant, terminateSessionPlayers } from "./quiz_play";
+import {
+	kickParticipant,
+	broadcastToSessionPlayers,
+	terminateSessionPlayers,
+	wsByParticipant
+} from "./quiz_play";
 import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
 
 type PresenterConnection = {
@@ -353,6 +357,119 @@ presentWs.get(
 								}
 							}
 						}
+						return;
+					}
+
+					if (data.type === "START_SESSION") {
+						await database
+							.update(quizSessions)
+							.set({ status: "question_active", currentQuestionIndex: 0 })
+							.where(eq(quizSessions.id, sessionId));
+
+						const quizQuestions = await database
+							.select()
+							.from(questions)
+							.where(eq(questions.quizId, session.quizId))
+							.orderBy(questions.position);
+
+						const firstQ = quizQuestions[0];
+						if (!firstQ) return;
+
+						const qOptions = await database
+							.select()
+							.from(quizOptions)
+							.where(eq(quizOptions.questionId, firstQ.id))
+							.orderBy(quizOptions.position);
+
+						// Save standard UI slot colors before shuffling options
+						const slotColors = qOptions.map((o) => o.color);
+
+						// Fisher-Yates Shuffle
+						const shuffledOptions = [...qOptions];
+						for (let i = shuffledOptions.length - 1; i > 0; i--) {
+							const j = Math.floor(Math.random() * (i + 1));
+							[shuffledOptions[i], shuffledOptions[j]] = [shuffledOptions[j], shuffledOptions[i]];
+						}
+
+						// Re-assign colors to slots so UI option colors DO NOT move
+						shuffledOptions.forEach((opt, idx) => {
+							opt.color = slotColors[idx] ?? opt.color;
+						});
+
+						const presenterPayload = { question: firstQ, options: shuffledOptions };
+						const playerOptions = shuffledOptions.map((o) => ({
+							id: o.id,
+							text: o.text,
+							color: o.color,
+							position: o.position
+						}));
+
+						const playerPayload = {
+							question: {
+								id: firstQ.id,
+								text: firstQ.text,
+								type: firstQ.type,
+								timeLimit: firstQ.timeLimit,
+								isMultiSelect: firstQ.isMultiSelect
+							},
+							options: playerOptions
+						};
+
+						const previewDurationMs = 5000;
+						const previewServerTime = Date.now();
+
+						const globalPlayState = (globalThis as any)["__quiz_play_state__"];
+						if (globalPlayState?.activeQuestionsBySession) {
+							globalPlayState.activeQuestionsBySession.set(sessionId, {
+								type: "QUESTION_PREVIEW",
+								serverTime: previewServerTime,
+								durationMs: previewDurationMs,
+								payload: playerPayload
+							});
+						}
+
+						broadcastToPresenters(sessionId, {
+							type: "QUESTION_PREVIEW",
+							serverTime: previewServerTime,
+							durationMs: previewDurationMs,
+							payload: presenterPayload
+						});
+
+						broadcastToSessionPlayers(sessionId, {
+							type: "QUESTION_PREVIEW",
+							serverTime: previewServerTime,
+							durationMs: previewDurationMs,
+							payload: playerPayload
+						});
+
+						setTimeout(() => {
+							const activeServerTime = Date.now();
+							const activeDurationMs = firstQ.timeLimit * 1000;
+
+							if (globalPlayState?.activeQuestionsBySession) {
+								globalPlayState.activeQuestionsBySession.set(sessionId, {
+									type: "QUESTION_ACTIVE",
+									serverTime: activeServerTime,
+									durationMs: activeDurationMs,
+									payload: playerPayload
+								});
+							}
+
+							broadcastToPresenters(sessionId, {
+								type: "QUESTION_ACTIVE",
+								serverTime: activeServerTime,
+								durationMs: activeDurationMs,
+								payload: presenterPayload
+							});
+
+							broadcastToSessionPlayers(sessionId, {
+								type: "QUESTION_ACTIVE",
+								serverTime: activeServerTime,
+								durationMs: activeDurationMs,
+								payload: playerPayload
+							});
+						}, previewDurationMs);
+
 						return;
 					}
 
