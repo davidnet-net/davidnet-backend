@@ -53,7 +53,7 @@ shortsRoute.post("/", requireAuth, async (c) => {
 		// Upload to S3 bucket named "shorts"
 		await uploadToBucket("shorts", fileName, buffer, file.type);
 
-		const videoUrl = `https://davidnet-backend.davidnet.net/auth/shorts/video/${fileName}`;
+		const videoUrl = `https://davidnet-backend.davidnet.net/social/shorts/video/${fileName}`;
 
 		const [newShort] = await database
 			.insert(shorts)
