@@ -30,7 +30,7 @@ export const signup = new Hono();
 
 signup.post(
 	"/",
-	createRateLimiter(3, 15 * 60 * 1000),
+	createRateLimiter(10, 15 * 60 * 1000),
 	sValidator("json", signupSchema),
 	async (c) => {
 		const data = c.req.valid("json");
@@ -246,7 +246,7 @@ signup.patch(
 	}
 );
 
-signup.post("/resend-email", createRateLimiter(3, 15 * 60 * 1000), async (c) => {
+signup.post("/resend-email", createRateLimiter(10, 15 * 60 * 1000), async (c) => {
 	const signupToken = c.req.header("X-SignupToken");
 
 	const userId = await isValidSignupToken(signupToken);
@@ -428,7 +428,7 @@ signup.post(
 	}
 );
 
-signup.post("/finish", createRateLimiter(5, 15 * 60 * 1000), async (c) => {
+signup.post("/finish", createRateLimiter(20, 15 * 60 * 1000), async (c) => {
 	const signupToken = c.req.header("X-SignupToken");
 
 	const userId = await isValidSignupToken(signupToken);

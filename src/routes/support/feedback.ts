@@ -10,7 +10,7 @@ export const feedback = new Hono<Env>();
 
 feedback.post(
 	"/",
-	createRateLimiter(3, 15 * 60 * 1000),
+	createRateLimiter(10, 15 * 60 * 1000),
 	sValidator("json", feedbackSchema),
 	requireAuth,
 	async (c) => {

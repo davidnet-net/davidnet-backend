@@ -15,7 +15,7 @@ export const recovery = new Hono<Env>();
 // 1. Request Password Reset Email
 recovery.post(
 	"/send-recovery-email",
-	createRateLimiter(3, 15 * 60 * 1000), // 3 requests per 15 minutes
+	createRateLimiter(10, 15 * 60 * 1000), // 3 requests per 15 minutes
 	sValidator("json", sendRecoveryEmailSchema),
 	async (c) => {
 		const data = c.req.valid("json");
