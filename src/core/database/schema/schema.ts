@@ -6,3 +6,4 @@ export * from "./connections";
 export * from "./workspaces";
 export * from "./support";
 export * from "./quiz";
+export * from "./shorts";
