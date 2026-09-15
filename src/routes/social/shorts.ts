@@ -38,7 +38,7 @@ shortsRoute.post("/", requireAuth, async (c) => {
     }
 
     // 100MB File Size Limit
-    const MAX_FILE_SIZE = 100 * 1024 * 1024;
+    const MAX_FILE_SIZE = 35 * 1024 * 1024;
     if (file.size > MAX_FILE_SIZE) {
         return c.json({ success: false, code: "FILE_TOO_LARGE" }, 400);
     }
