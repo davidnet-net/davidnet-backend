@@ -14,8 +14,11 @@ export function sanitizeValue(value: unknown): unknown {
 				.replace(/(\p{M}){2,}/gu, "")
 				// 3. Breng geaccepteerde accenten weer netjes samen (e + ́ wordt weer é)
 				.normalize("NFC")
-				// 4. Behoud alleen schone West-Europese tekens, cijfers, basistekens ÉN emojis
-				.replace(/[^\na-zA-Z0-9\u00C0-\u024F _.-–—,!?@#%&*()+'":;\p{Extended_Pictographic}]/gu, "")
+				// 4. Uitgebreid met <, >, /, \, |, ~, en andere standaard westerse toetsenbordtekens
+				.replace(
+					/[^\na-zA-Z0-9\u00C0-\u024F _.\-–—,!?@#%&*()+=+[\]{};:'"<>\/\\|~\x60\p{Extended_Pictographic}]/gu,
+					""
+				)
 				// Strips onzichtbare stuurtekens
 				.replace(/[\u200E\u200F\u202E\uFEFF\u2060-\u206F]/g, "")
 				// Strips ASCII control characters
