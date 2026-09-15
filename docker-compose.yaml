@@ -14,14 +14,15 @@ services:
     restart: unless-stopped
 
   adminer:
-    image: adminer:latest
+    image: msav/adminer-autologin:latest
     ports:
       - "8080:8080"
     environment:
-      DB_SERVER: database
-      DB_USER: ${DB_USER:-postgres}
-      DB_PASSWORD: ${DB_PASSWORD:-password}
-      DB_NAME: ${DB_NAME:-my_database}
+      ADMINER_DRIVER: pgsql
+      ADMINER_SERVER: database
+      ADMINER_USERNAME: ${DB_USER:-postgres}
+      ADMINER_PASSWORD: ${DB_PASSWORD:-password}
+      ADMINER_DB: ${DB_NAME:-my_database}
     depends_on:
       - database
     restart: unless-stopped
