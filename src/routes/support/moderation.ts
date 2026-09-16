@@ -34,7 +34,7 @@ async function isModerator(userId: string): Promise<boolean> {
 // ============================================================================
 
 // --- 1. SUBMIT A REPORT ---
-moderationRoute.post("/reports", requireAuth, async (c) => {
+moderationRoute.post("/report", requireAuth, async (c) => {
 	const reporterId = c.get("user").id;
 	let body;
 
