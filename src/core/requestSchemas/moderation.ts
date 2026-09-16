@@ -27,3 +27,7 @@ export const createViolationSchema = type({
 	reason: "string",
 	"moderatorReason?": "string"
 });
+
+export const moderateShortSchema = type({
+	isModerated: "boolean"
+});

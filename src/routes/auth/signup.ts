@@ -5,6 +5,7 @@ import { setCookie } from "hono/cookie";
 
 import { database } from "../../core/database/client";
 import {
+	accountModerationStatus,
 	internalAccess,
 	signupStatus,
 	userPreferences,
@@ -162,6 +163,12 @@ signup.post(
 			developerAccess: false
 		});
 
+		// Initialize account moderation and trust status row for the new user
+		await database.insert(accountModerationStatus).values({
+			userId: userInsertion[0].userID,
+			reportTrustScore: 100
+		});
+
 		sendSignupVerifyEmail(signupStatusInsertion[0].emailVerificationToken, userInsertion[0].email);
 
 		await createUserAuditLog(userInsertion[0].userID, "Account created.");
@@ -211,10 +218,6 @@ signup.patch(
 			return c.json({ success: false, code: "EMAIL_TAKEN" }, 400);
 		}
 
-		// Validation complete
-		// - email valid and not taken
-		// - token valid and exists
-
 		const updateResult = await database
 			.update(users)
 			.set({
@@ -232,7 +235,6 @@ signup.patch(
 			.where(eq(signupStatus.userId, userId as string))
 			.limit(1);
 
-		// Send signup mail
 		sendSignupVerifyEmail(existingSignupStatus[0].emailVerificationToken, updateResult[0].email);
 
 		return c.json(
@@ -272,7 +274,6 @@ signup.post("/resend-email", createRateLimiter(10, 15 * 60 * 1000), async (c) =>
 		.where(eq(signupStatus.userId, userId as string))
 		.limit(1);
 
-	// Send signup mail
 	sendSignupVerifyEmail(existingSignupStatus[0].emailVerificationToken, existingUser[0].email);
 
 	return c.json(
@@ -379,7 +380,6 @@ signup.post(
 	async (c) => {
 		const signupToken = c.req.header("X-SignupToken");
 
-		// 1. Validate the signup token
 		const userId = await isValidSignupToken(signupToken);
 		if (!userId) {
 			return c.json({ success: false, code: "SIGNUPTOKEN_INVALID" }, 401);
@@ -387,7 +387,6 @@ signup.post(
 
 		const data = c.req.valid("json");
 
-		// 2. Insert or Update Preferences (Upsert prevents errors on double-submissions)
 		await database
 			.insert(userPreferences)
 			.values({
@@ -409,7 +408,6 @@ signup.post(
 				}
 			});
 
-		// 3. Mark the preferences step as completed in signup_status
 		await database
 			.update(signupStatus)
 			.set({
@@ -417,7 +415,6 @@ signup.post(
 			})
 			.where(eq(signupStatus.userId, userId as string));
 
-		// 4. Return success
 		return c.json(
 			{
 				success: true,

@@ -1,5 +1,6 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import { type } from "arktype";
 
 import { database } from "../../core/database/client";
 import {
@@ -10,6 +11,12 @@ import {
 	shorts,
 	violations
 } from "../../core/database/schema/schema";
+import {
+	createReportSchema,
+	updateReportStatusSchema,
+	banUserSchema,
+	createViolationSchema
+} from "../../core/requestSchemas/moderation";
 import { collectAuth } from "../../middlewares/collectAuth";
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
 
@@ -44,17 +51,14 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 		return c.json({ success: false, code: "INVALID_JSON" }, 400);
 	}
 
-	const { reportType, reportedId, reason } = body;
-
-	if (!reportType || !["profile", "short"].includes(reportType)) {
-		return c.json({ success: false, code: "INVALID_REPORT_TYPE" }, 400);
+	const result = createReportSchema(body);
+	if (result instanceof type.errors) {
+		return c.json({ success: false, code: "INVALID_REQUEST_BODY", errors: result.summary }, 400);
 	}
 
-	if (!reportedId || typeof reportedId !== "string") {
-		return c.json({ success: false, code: "MISSING_REPORTED_ID" }, 400);
-	}
+	const { reportType, reportedId, reason } = result;
 
-	if (!reason || typeof reason !== "string" || reason.trim().length === 0) {
+	if (reason.trim().length === 0) {
 		return c.json({ success: false, code: "MISSING_REASON" }, 400);
 	}
 
@@ -284,10 +288,12 @@ moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
 		return c.json({ success: false, code: "INVALID_JSON" }, 400);
 	}
 
-	const { status } = body;
-	if (!status || !["pending", "resolved", "dismissed"].includes(status)) {
-		return c.json({ success: false, code: "INVALID_STATUS" }, 400);
+	const result = updateReportStatusSchema(body);
+	if (result instanceof type.errors) {
+		return c.json({ success: false, code: "INVALID_STATUS", errors: result.summary }, 400);
 	}
+
+	const { status } = result;
 
 	try {
 		const [updatedReport] = await database
@@ -329,21 +335,14 @@ moderationRoute.post("/violations", requireAuth, async (c) => {
 		return c.json({ success: false, code: "INVALID_JSON" }, 400);
 	}
 
-	const { userId, reportedType, reportedId, reason, moderatorReason } = body;
-
-	if (!userId || typeof userId !== "string") {
-		return c.json({ success: false, code: "MISSING_USER_ID" }, 400);
+	const result = createViolationSchema(body);
+	if (result instanceof type.errors) {
+		return c.json({ success: false, code: "INVALID_REQUEST_BODY", errors: result.summary }, 400);
 	}
 
-	if (!reportedType || !["profile", "short"].includes(reportedType)) {
-		return c.json({ success: false, code: "INVALID_REPORTED_TYPE" }, 400);
-	}
+	const { userId, reportedType, reportedId, reason, moderatorReason } = result;
 
-	if (!reportedId || typeof reportedId !== "string") {
-		return c.json({ success: false, code: "MISSING_REPORTED_ID" }, 400);
-	}
-
-	if (!reason || typeof reason !== "string" || reason.trim().length === 0) {
+	if (reason.trim().length === 0) {
 		return c.json({ success: false, code: "MISSING_REASON" }, 400);
 	}
 
@@ -352,9 +351,6 @@ moderationRoute.post("/violations", requireAuth, async (c) => {
 	}
 
 	if (moderatorReason !== undefined && moderatorReason !== null) {
-		if (typeof moderatorReason !== "string") {
-			return c.json({ success: false, code: "INVALID_MODERATOR_REASON" }, 400);
-		}
 		if (moderatorReason.length > 2000) {
 			return c.json({ success: false, code: "MODERATOR_REASON_TOO_LONG" }, 400);
 		}
@@ -403,7 +399,12 @@ moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 		return c.json({ success: false, code: "INVALID_JSON" }, 400);
 	}
 
-	const { bannedUntil } = body;
+	const result = banUserSchema(body);
+	if (result instanceof type.errors) {
+		return c.json({ success: false, code: "INVALID_DATE_FORMAT", errors: result.summary }, 400);
+	}
+
+	const { bannedUntil } = result;
 
 	let bannedDate: Date | null = null;
 	if (bannedUntil !== null && bannedUntil !== undefined) {
@@ -436,6 +437,69 @@ moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 		});
 	} catch (error) {
 		console.error("Failed to update user ban status:", error);
+		return c.json({ success: false, code: "UPDATE_FAILED" }, 500);
+	}
+});
+
+// --- 6. UPDATE REPORT STATUS (Bulk updates matching reported items) ---
+moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const reportId = c.req.param("id");
+	let body;
+
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ success: false, code: "INVALID_JSON" }, 400);
+	}
+
+	const result = updateReportStatusSchema(body);
+	if (result instanceof type.errors) {
+		return c.json({ success: false, code: "INVALID_STATUS", errors: result.summary }, 400);
+	}
+
+	const { status } = result;
+
+	try {
+		// 1. Fetch the target report to identify its content target
+		const [targetReport] = await database
+			.select()
+			.from(reports)
+			.where(eq(reports.id, reportId))
+			.limit(1);
+
+		if (!targetReport) {
+			return c.json({ success: false, code: "REPORT_NOT_FOUND" }, 404);
+		}
+
+		// 2. Update all reports sharing the same reportedId and reportType
+		const updatedReports = await database
+			.update(reports)
+			.set({
+				status: status as "pending" | "resolved" | "dismissed",
+				updatedAt: new Date()
+			})
+			.where(
+				and(
+					eq(reports.reportedId, targetReport.reportedId),
+					eq(reports.reportType, targetReport.reportType)
+				)
+			)
+			.returning();
+
+		return c.json({
+			success: true,
+			code: "REPORT_STATUS_UPDATED",
+			report: updatedReports[0],
+			updatedCount: updatedReports.length
+		});
+	} catch (error) {
+		console.error("Failed to update report status:", error);
 		return c.json({ success: false, code: "UPDATE_FAILED" }, 500);
 	}
 });
