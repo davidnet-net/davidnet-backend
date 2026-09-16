@@ -1,8 +1,13 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 
 import { database } from "../../core/database/client";
-import { accountModerationStatus, shorts, users } from "../../core/database/schema/schema";
+import {
+	accountModerationStatus,
+	internalAccess,
+	shorts,
+	users
+} from "../../core/database/schema/schema";
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
 import { collectAuth } from "../../middlewares/collectAuth";
 import { uploadToBucket, getFromBucket } from "../../core/shared/s3";
@@ -40,6 +45,20 @@ async function checkIfBanned(userId: string, c: any) {
 		console.error("Failed to verify ban status:", error);
 		return false;
 	}
+}
+
+// --- HELPER: CHECK MODERATOR PERMISSIONS ---
+async function isModerator(userId: string): Promise<boolean> {
+	const [access] = await database
+		.select({
+			internalAccess: internalAccess.internalAccess,
+			supportAccess: internalAccess.supportAccess
+		})
+		.from(internalAccess)
+		.where(eq(internalAccess.userId, userId))
+		.limit(1);
+
+	return Boolean(access && access.internalAccess && access.supportAccess);
 }
 
 // --- 1. UPLOAD SHORT ---
@@ -104,7 +123,8 @@ shortsRoute.post("/", requireAuth, async (c) => {
 				views: 0,
 				likesCount: 0,
 				watchDuration: 0,
-				videoLength: 0
+				videoLength: 0,
+				isModerated: false
 			})
 			.returning();
 
@@ -164,6 +184,7 @@ shortsRoute.get("/", collectAuth, async (c) => {
 			})
 			.from(shorts)
 			.innerJoin(users, eq(shorts.userId, users.userId))
+			.where(eq(shorts.isModerated, false))
 			.orderBy(desc(shorts.createdAt))
 			.limit(limit)
 			.offset(offset);
@@ -205,7 +226,7 @@ shortsRoute.get("/:id", collectAuth, async (c) => {
 			})
 			.from(shorts)
 			.innerJoin(users, eq(shorts.userId, users.userId))
-			.where(eq(shorts.id, id))
+			.where(and(eq(shorts.id, id), eq(shorts.isModerated, false)))
 			.limit(1);
 
 		const targetShort = result[0];
@@ -245,5 +266,53 @@ shortsRoute.get("/video/:filename", async (c) => {
 		return c.body(s3Object.Body.transformToWebStream());
 	} catch (error) {
 		return c.json({ error: "Video not found" }, 404);
+	}
+});
+
+// --- 5. MODERATE / UNMODERATE SHORT (Moderator Action) ---
+shortsRoute.patch("/:id/moderate", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const shortId = c.req.param("id");
+	let body;
+
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ success: false, code: "INVALID_JSON" }, 400);
+	}
+
+	const { isModerated } = body;
+
+	if (typeof isModerated !== "boolean") {
+		return c.json({ success: false, code: "INVALID_IS_MODERATED_VALUE" }, 400);
+	}
+
+	try {
+		const [updatedShort] = await database
+			.update(shorts)
+			.set({
+				isModerated,
+				updatedAt: new Date()
+			})
+			.where(eq(shorts.id, shortId))
+			.returning();
+
+		if (!updatedShort) {
+			return c.json({ success: false, code: "SHORT_NOT_FOUND" }, 404);
+		}
+
+		return c.json({
+			success: true,
+			code: isModerated ? "SHORT_MODERATED" : "SHORT_UNMODERATED",
+			short: updatedShort
+		});
+	} catch (error) {
+		console.error("Failed to moderate short:", error);
+		return c.json({ success: false, code: "UPDATE_FAILED" }, 500);
 	}
 });

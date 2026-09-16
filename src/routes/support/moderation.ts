@@ -65,7 +65,6 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 	let actualReportedUserId: string;
 
 	try {
-		// SECURE BACKEND LOOKUP: Fetch the actual user ID based on what is being reported
 		if (reportType === "short") {
 			const [targetShort] = await database
 				.select({ userId: shorts.userId })
@@ -78,7 +77,6 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 			}
 			actualReportedUserId = targetShort.userId;
 		} else if (reportType === "profile") {
-			// If reporting a profile, the reportedId IS the userId.
 			const [targetUser] = await database
 				.select({ userId: users.userId })
 				.from(users)
@@ -93,7 +91,6 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 			return c.json({ success: false, code: "INVALID_REPORT_TYPE" }, 400);
 		}
 
-		// Insert report using the securely retrieved ID
 		const [newReport] = await database
 			.insert(reports)
 			.values({
@@ -150,7 +147,36 @@ moderationRoute.get("/reports/me", requireAuth, async (c) => {
 	}
 });
 
-// --- 3. CHECK CURRENT USER BAN STATUS ---
+// --- 3. GET MY VIOLATIONS LIST ---
+moderationRoute.get("/violations/me", requireAuth, async (c) => {
+	const userId = c.get("user").id;
+
+	try {
+		const userViolations = await database
+			.select({
+				id: violations.id,
+				reportedType: violations.reportedType,
+				reportedId: violations.reportedId,
+				reason: violations.reason,
+				moderatorReason: violations.moderatorReason,
+				createdAt: violations.createdAt
+			})
+			.from(violations)
+			.where(eq(violations.userId, userId))
+			.orderBy(desc(violations.createdAt));
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			violations: userViolations
+		});
+	} catch (error) {
+		console.error("Failed to fetch user violations:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 4. CHECK CURRENT USER BAN STATUS ---
 moderationRoute.get("/me/ban-status", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (!user) {
@@ -172,7 +198,6 @@ moderationRoute.get("/me/ban-status", collectAuth, async (c) => {
 		const bannedUntilDate = new Date(status.bannedUntil);
 
 		if (bannedUntilDate <= now) {
-			// Auto-clear expired ban
 			await database
 				.update(accountModerationStatus)
 				.set({ bannedUntil: null, updatedAt: now })
@@ -196,7 +221,7 @@ moderationRoute.get("/me/ban-status", collectAuth, async (c) => {
 // MODERATOR ENDPOINTS (Requires internalAccess AND supportAccess)
 // ============================================================================
 
-// --- 4. GET REPORTS LIST (Moderator Dashboard Queue) ---
+// --- 5. GET REPORTS LIST (Moderator Dashboard Queue) ---
 moderationRoute.get("/reports", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -242,7 +267,7 @@ moderationRoute.get("/reports", requireAuth, async (c) => {
 	}
 });
 
-// --- 5. UPDATE REPORT STATUS ---
+// --- 6. UPDATE REPORT STATUS ---
 moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -289,7 +314,7 @@ moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
 	}
 });
 
-// --- 6. CREATE VIOLATION / STRIKE ---
+// --- 7. CREATE VIOLATION / STRIKE ---
 moderationRoute.post("/violations", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -361,7 +386,7 @@ moderationRoute.post("/violations", requireAuth, async (c) => {
 	}
 });
 
-// --- 7. BAN OR UNBAN A USER ---
+// --- 8. BAN OR UNBAN A USER ---
 moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 

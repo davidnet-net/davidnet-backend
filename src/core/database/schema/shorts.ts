@@ -1,5 +1,5 @@
 import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
-import { integer, pgSchema, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, pgSchema, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { authSchema, users } from "./auth";
 
 // --- TABLES ---
@@ -21,6 +21,7 @@ export const shorts = authSchema.table("shorts", {
 	likesCount: integer("likes_count").default(0).notNull(),
 	watchDuration: integer("watch_duration").default(0).notNull(),
 	videoLength: integer("video_length").default(0).notNull(),
+	isModerated: boolean("is_moderated").default(false).notNull(),
 
 	// Timestamps
 	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
