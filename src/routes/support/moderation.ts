@@ -271,7 +271,7 @@ moderationRoute.get("/reports", requireAuth, async (c) => {
 	}
 });
 
-// --- 6. UPDATE REPORT STATUS ---
+// --- 6. UPDATE REPORT STATUS (Bulk updates matching reported items) ---
 moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -296,23 +296,35 @@ moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
 	const { status } = result;
 
 	try {
-		const [updatedReport] = await database
+		const [targetReport] = await database
+			.select()
+			.from(reports)
+			.where(eq(reports.id, reportId))
+			.limit(1);
+
+		if (!targetReport) {
+			return c.json({ success: false, code: "REPORT_NOT_FOUND" }, 404);
+		}
+
+		const updatedReports = await database
 			.update(reports)
 			.set({
 				status: status as "pending" | "resolved" | "dismissed",
 				updatedAt: new Date()
 			})
-			.where(eq(reports.id, reportId))
+			.where(
+				and(
+					eq(reports.reportedId, targetReport.reportedId),
+					eq(reports.reportType, targetReport.reportType)
+				)
+			)
 			.returning();
-
-		if (!updatedReport) {
-			return c.json({ success: false, code: "REPORT_NOT_FOUND" }, 404);
-		}
 
 		return c.json({
 			success: true,
 			code: "REPORT_STATUS_UPDATED",
-			report: updatedReport
+			report: updatedReports[0],
+			updatedCount: updatedReports.length
 		});
 	} catch (error) {
 		console.error("Failed to update report status:", error);
@@ -441,65 +453,81 @@ moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 	}
 });
 
-// --- 6. UPDATE REPORT STATUS (Bulk updates matching reported items) ---
-moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
+// --- 9. GET TARGET USER BAN STATUS (Moderator Action) ---
+moderationRoute.get("/users/:userId/ban-status", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
 	if (!(await isModerator(moderatorId))) {
 		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
 	}
 
-	const reportId = c.req.param("id");
-	let body;
+	const targetUserId = c.req.param("userId");
 
 	try {
-		body = await c.req.json();
-	} catch {
-		return c.json({ success: false, code: "INVALID_JSON" }, 400);
-	}
-
-	const result = updateReportStatusSchema(body);
-	if (result instanceof type.errors) {
-		return c.json({ success: false, code: "INVALID_STATUS", errors: result.summary }, 400);
-	}
-
-	const { status } = result;
-
-	try {
-		// 1. Fetch the target report to identify its content target
-		const [targetReport] = await database
+		const [status] = await database
 			.select()
-			.from(reports)
-			.where(eq(reports.id, reportId))
+			.from(accountModerationStatus)
+			.where(eq(accountModerationStatus.userId, targetUserId))
 			.limit(1);
 
-		if (!targetReport) {
-			return c.json({ success: false, code: "REPORT_NOT_FOUND" }, 404);
+		if (!status || !status.bannedUntil) {
+			return c.json({ success: true, isBanned: false, bannedUntil: null });
 		}
 
-		// 2. Update all reports sharing the same reportedId and reportType
-		const updatedReports = await database
-			.update(reports)
-			.set({
-				status: status as "pending" | "resolved" | "dismissed",
-				updatedAt: new Date()
-			})
-			.where(
-				and(
-					eq(reports.reportedId, targetReport.reportedId),
-					eq(reports.reportType, targetReport.reportType)
-				)
-			)
-			.returning();
+		const now = new Date();
+		const bannedUntilDate = new Date(status.bannedUntil);
+
+		if (bannedUntilDate <= now) {
+			await database
+				.update(accountModerationStatus)
+				.set({ bannedUntil: null, updatedAt: now })
+				.where(eq(accountModerationStatus.userId, targetUserId));
+
+			return c.json({ success: true, isBanned: false, bannedUntil: null });
+		}
 
 		return c.json({
 			success: true,
-			code: "REPORT_STATUS_UPDATED",
-			report: updatedReports[0],
-			updatedCount: updatedReports.length
+			isBanned: true,
+			bannedUntil: status.bannedUntil
 		});
 	} catch (error) {
-		console.error("Failed to update report status:", error);
-		return c.json({ success: false, code: "UPDATE_FAILED" }, 500);
+		console.error("Failed to fetch target user ban status:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 10. GET TARGET USER VIOLATIONS (Moderator Action) ---
+moderationRoute.get("/users/:userId/violations", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const targetUserId = c.req.param("userId");
+
+	try {
+		const userViolations = await database
+			.select({
+				id: violations.id,
+				reportedType: violations.reportedType,
+				reportedId: violations.reportedId,
+				reason: violations.reason,
+				moderatorReason: violations.moderatorReason,
+				createdAt: violations.createdAt
+			})
+			.from(violations)
+			.where(eq(violations.userId, targetUserId))
+			.orderBy(desc(violations.createdAt));
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			violations: userViolations
+		});
+	} catch (error) {
+		console.error("Failed to fetch target user violations:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
 	}
 });
