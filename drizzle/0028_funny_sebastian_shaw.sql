@@ -1,0 +1,1 @@
+ALTER TABLE "auth"."shorts" ADD COLUMN "is_moderated" boolean DEFAULT false NOT NULL;
