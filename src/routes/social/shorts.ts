@@ -31,7 +31,6 @@ async function checkIfBanned(userId: string, c: any) {
 		const bannedUntilDate = new Date(status.bannedUntil);
 
 		if (bannedUntilDate <= now) {
-			// Auto-clear expired ban in the background
 			await database
 				.update(accountModerationStatus)
 				.set({ bannedUntil: null, updatedAt: now })
@@ -65,7 +64,6 @@ async function isModerator(userId: string): Promise<boolean> {
 shortsRoute.post("/", requireAuth, async (c) => {
 	const userId = c.get("user").id;
 
-	// Check if user is banned before allowing upload action
 	if (await checkIfBanned(userId, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
@@ -75,7 +73,6 @@ shortsRoute.post("/", requireAuth, async (c) => {
 	const title = body["title"];
 	const file = body["video"];
 
-	// Title validation
 	if (typeof title !== "string" || title.trim().length === 0) {
 		return c.json({ success: false, code: "MISSING_TITLE" }, 400);
 	}
@@ -85,7 +82,6 @@ shortsRoute.post("/", requireAuth, async (c) => {
 		return c.json({ success: false, code: "TITLE_TOO_LONG" }, 400);
 	}
 
-	// File validation
 	if (!file || !(file instanceof File)) {
 		return c.json({ success: false, code: "MISSING_VIDEO_FILE" }, 400);
 	}
@@ -95,7 +91,6 @@ shortsRoute.post("/", requireAuth, async (c) => {
 		return c.json({ success: false, code: "INVALID_FILE_TYPE" }, 400);
 	}
 
-	// 100MB File Size Limit
 	const MAX_FILE_SIZE = 35 * 1024 * 1024;
 	if (file.size > MAX_FILE_SIZE) {
 		return c.json({ success: false, code: "FILE_TOO_LARGE" }, 400);
@@ -108,7 +103,6 @@ shortsRoute.post("/", requireAuth, async (c) => {
 	const buffer = Buffer.from(await file.arrayBuffer());
 
 	try {
-		// Upload to S3 bucket named "shorts"
 		await uploadToBucket("shorts", fileName, buffer, file.type);
 
 		const videoUrl = `https://davidnet-backend.davidnet.net/social/shorts/video/${fileName}`;
@@ -141,7 +135,6 @@ shortsRoute.post("/", requireAuth, async (c) => {
 
 // --- 2. GET SHORTS FEED ---
 shortsRoute.get("/", collectAuth, async (c) => {
-	// If a logged-in user is making requests, check if they are banned
 	const user = c.get("user");
 	if (user && (await checkIfBanned(user.id, c))) {
 		return c.json({ success: false, code: "BANNED" }, 403);
@@ -200,7 +193,7 @@ shortsRoute.get("/", collectAuth, async (c) => {
 	}
 });
 
-// --- 3. GET SINGLE SHORT ---
+// --- 3. GET SINGLE SHORT (Allows moderators to view moderated shorts + returns isModerated status) ---
 shortsRoute.get("/:id", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (user && (await checkIfBanned(user.id, c))) {
@@ -208,8 +201,13 @@ shortsRoute.get("/:id", collectAuth, async (c) => {
 	}
 
 	const id = c.req.param("id");
+	const modCheck = user ? await isModerator(user.id) : false;
 
 	try {
+		const conditions = modCheck
+			? eq(shorts.id, id)
+			: and(eq(shorts.id, id), eq(shorts.isModerated, false));
+
 		const result = await database
 			.select({
 				id: shorts.id,
@@ -222,11 +220,12 @@ shortsRoute.get("/:id", collectAuth, async (c) => {
 				likesCount: shorts.likesCount,
 				watchDuration: shorts.watchDuration,
 				videoLength: shorts.videoLength,
+				isModerated: shorts.isModerated,
 				createdAt: shorts.createdAt
 			})
 			.from(shorts)
 			.innerJoin(users, eq(shorts.userId, users.userId))
-			.where(and(eq(shorts.id, id), eq(shorts.isModerated, false)))
+			.where(conditions)
 			.limit(1);
 
 		const targetShort = result[0];
