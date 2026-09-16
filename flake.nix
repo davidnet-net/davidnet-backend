@@ -26,6 +26,7 @@
             bun
             nodejs_22
             lsof # for easy port killing eg sudo lsof -t -i:3000 -i:3020 | xargs -r sudo kill -9
+            ffmpeg
           ];
 
           shellHook = ''

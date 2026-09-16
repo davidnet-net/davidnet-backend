@@ -1,5 +1,7 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, notInArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { getVideoDurationInSeconds } from "get-video-duration";
+import { Readable } from "stream";
 
 import { database } from "../../core/database/client";
 import {
@@ -102,6 +104,16 @@ shortsRoute.post("/", requireAuth, async (c) => {
 	const fileName = `${shortId}.${fileExt}`;
 	const buffer = Buffer.from(await file.arrayBuffer());
 
+	let actualVideoLength = 15; // Safe fallback
+
+	try {
+		const stream = Readable.from(buffer);
+		const duration = await getVideoDurationInSeconds(stream);
+		actualVideoLength = Math.max(1, Math.round(duration));
+	} catch (err) {
+		console.warn("Failed to extract video duration, using fallback:", err);
+	}
+
 	try {
 		await uploadToBucket("shorts", fileName, buffer, file.type);
 
@@ -117,7 +129,7 @@ shortsRoute.post("/", requireAuth, async (c) => {
 				views: 0,
 				likesCount: 0,
 				watchDuration: 0,
-				videoLength: 0,
+				videoLength: actualVideoLength,
 				isModerated: false
 			})
 			.returning();
@@ -133,35 +145,46 @@ shortsRoute.post("/", requireAuth, async (c) => {
 	}
 });
 
-// --- 2. GET SHORTS FEED ---
-shortsRoute.get("/", collectAuth, async (c) => {
+// --- 2. GET SHORTS FEED (80/20 Algorithmic + Loop Prevention) ---
+shortsRoute.post("/feed", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (user && (await checkIfBanned(user.id, c))) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
-	const limitQuery = c.req.query("limit");
-	const offsetQuery = c.req.query("offset");
-
-	let limit = 15;
-	let offset = 0;
-
-	if (limitQuery) {
-		const parsedLimit = parseInt(limitQuery, 10);
-		if (!isNaN(parsedLimit) && parsedLimit > 0 && parsedLimit <= 50) {
-			limit = parsedLimit;
-		}
+	let body;
+	try {
+		body = await c.req.json();
+	} catch {
+		body = {};
 	}
 
-	if (offsetQuery) {
-		const parsedOffset = parseInt(offsetQuery, 10);
-		if (!isNaN(parsedOffset) && parsedOffset > 0) {
-			offset = parsedOffset;
-		}
-	}
+	const limit =
+		typeof body.limit === "number" && body.limit > 0 && body.limit <= 50 ? body.limit : 15;
+	const seenIds: string[] = Array.isArray(body.seenIds) ? body.seenIds : [];
+
+	const algoLimit = Math.ceil(limit * 0.8);
+	const discoveryLimit = limit - algoLimit;
 
 	try {
-		const result = await database
+		// Algorithm Math (Retention + Likes / Time Decay)
+		const ageInHours = sql`EXTRACT(EPOCH FROM (NOW() - ${shorts.createdAt})) / 3600`;
+		const apv = sql`LEAST(1.0, ${shorts.watchDuration}::float / GREATEST(${shorts.views} * GREATEST(${shorts.videoLength}, 1), 1))`;
+		const likeRate = sql`${shorts.likesCount}::float / GREATEST(${shorts.views}, 1)`;
+		const algoScore =
+			sql<number>`((70.0 * ${apv}) + (30.0 * ${likeRate})) / POWER(${ageInHours} + 1.0, 1.5)`.as(
+				"algo_score"
+			);
+
+		const algoConditions = [eq(shorts.isModerated, false)];
+		const discoveryConditions = [eq(shorts.isModerated, false), sql`${shorts.views} < 50`];
+
+		if (seenIds.length > 0) {
+			algoConditions.push(notInArray(shorts.id, seenIds));
+			discoveryConditions.push(notInArray(shorts.id, seenIds));
+		}
+
+		const algoQuery = database
 			.select({
 				id: shorts.id,
 				title: shorts.title,
@@ -173,19 +196,88 @@ shortsRoute.get("/", collectAuth, async (c) => {
 				likesCount: shorts.likesCount,
 				watchDuration: shorts.watchDuration,
 				videoLength: shorts.videoLength,
-				createdAt: shorts.createdAt
+				createdAt: shorts.createdAt,
+				score: algoScore
 			})
 			.from(shorts)
 			.innerJoin(users, eq(shorts.userId, users.userId))
-			.where(eq(shorts.isModerated, false))
+			.where(and(...algoConditions))
+			.orderBy(desc(algoScore))
+			.limit(algoLimit);
+
+		const discoveryQuery = database
+			.select({
+				id: shorts.id,
+				title: shorts.title,
+				videoUrl: shorts.videoUrl,
+				creator: users.username,
+				creatorDisplayName: users.displayName,
+				creatorAvatarUrl: users.avatarUrl,
+				views: shorts.views,
+				likesCount: shorts.likesCount,
+				watchDuration: shorts.watchDuration,
+				videoLength: shorts.videoLength,
+				createdAt: shorts.createdAt,
+				score: sql<number>`0.0`.as("score")
+			})
+			.from(shorts)
+			.innerJoin(users, eq(shorts.userId, users.userId))
+			.where(and(...discoveryConditions))
 			.orderBy(desc(shorts.createdAt))
-			.limit(limit)
-			.offset(offset);
+			.limit(discoveryLimit);
+
+		let [algoShorts, discoveryShorts] = await Promise.all([algoQuery, discoveryQuery]);
+
+		let combinedFeed = [];
+		let aIndex = 0,
+			dIndex = 0;
+		while (aIndex < algoShorts.length || dIndex < discoveryShorts.length) {
+			for (let i = 0; i < 4 && aIndex < algoShorts.length; i++)
+				combinedFeed.push(algoShorts[aIndex++]);
+			if (dIndex < discoveryShorts.length) combinedFeed.push(discoveryShorts[dIndex++]);
+		}
+
+		let uniqueFeed = Array.from(new Map(combinedFeed.map((item) => [item.id, item])).values());
+		let loopRestarted = false;
+
+		// Exhaustion Loop Fallback
+		if (uniqueFeed.length < limit && seenIds.length > 0) {
+			loopRestarted = true;
+			const remainingNeeded = limit - uniqueFeed.length;
+			const excludeIds = uniqueFeed.map((v) => v.id);
+
+			const fallbackConditions = [eq(shorts.isModerated, false)];
+			if (excludeIds.length > 0) fallbackConditions.push(notInArray(shorts.id, excludeIds));
+
+			const fallbackShorts = await database
+				.select({
+					id: shorts.id,
+					title: shorts.title,
+					videoUrl: shorts.videoUrl,
+					creator: users.username,
+					creatorDisplayName: users.displayName,
+					creatorAvatarUrl: users.avatarUrl,
+					views: shorts.views,
+					likesCount: shorts.likesCount,
+					watchDuration: shorts.watchDuration,
+					videoLength: shorts.videoLength,
+					createdAt: shorts.createdAt,
+					score: algoScore
+				})
+				.from(shorts)
+				.innerJoin(users, eq(shorts.userId, users.userId))
+				.where(and(...fallbackConditions))
+				.orderBy(desc(algoScore))
+				.limit(remainingNeeded);
+
+			uniqueFeed = [...uniqueFeed, ...fallbackShorts];
+		}
 
 		return c.json({
 			success: true,
 			code: "SUCCESS",
-			shorts: result
+			shorts: uniqueFeed,
+			loopRestarted
 		});
 	} catch (error) {
 		console.error("Failed to fetch shorts feed:", error);
@@ -193,7 +285,56 @@ shortsRoute.get("/", collectAuth, async (c) => {
 	}
 });
 
-// --- 3. GET SINGLE SHORT (Allows moderators to view moderated shorts + returns isModerated status) ---
+// --- 3. TRACK METRICS: WATCH TIME & VIEWS ---
+shortsRoute.post("/:id/watch", async (c) => {
+	const shortId = c.req.param("id");
+	let body;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ success: false }, 400);
+	}
+
+	const duration = typeof body.watchDuration === "number" ? Math.max(0, body.watchDuration) : 0;
+
+	try {
+		await database
+			.update(shorts)
+			.set({
+				views: sql`${shorts.views} + 1`,
+				watchDuration: sql`${shorts.watchDuration} + ${duration}`
+			})
+			.where(eq(shorts.id, shortId));
+		return c.json({ success: true });
+	} catch (error) {
+		return c.json({ success: false }, 500);
+	}
+});
+
+// --- 4. TRACK METRICS: LIKES ---
+shortsRoute.post("/:id/like", collectAuth, async (c) => {
+	const shortId = c.req.param("id");
+	let body;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ success: false }, 400);
+	}
+
+	const increment = body.liked ? 1 : -1;
+
+	try {
+		await database
+			.update(shorts)
+			.set({ likesCount: sql`GREATEST(${shorts.likesCount} + ${increment}, 0)` })
+			.where(eq(shorts.id, shortId));
+		return c.json({ success: true });
+	} catch (error) {
+		return c.json({ success: false }, 500);
+	}
+});
+
+// --- 5. GET SINGLE SHORT ---
 shortsRoute.get("/:id", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (user && (await checkIfBanned(user.id, c))) {
@@ -228,36 +369,22 @@ shortsRoute.get("/:id", collectAuth, async (c) => {
 			.where(conditions)
 			.limit(1);
 
-		const targetShort = result[0];
+		if (!result[0]) return c.json({ success: false, code: "SHORT_NOT_FOUND" }, 404);
 
-		if (!targetShort) {
-			return c.json({ success: false, code: "SHORT_NOT_FOUND" }, 404);
-		}
-
-		return c.json({
-			success: true,
-			code: "SUCCESS",
-			short: targetShort
-		});
+		return c.json({ success: true, code: "SUCCESS", short: result[0] });
 	} catch (error) {
-		console.error("Failed to fetch short:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
 	}
 });
 
-// --- 4. VIDEO RETRIEVAL / STREAMING ---
+// --- 6. VIDEO RETRIEVAL / STREAMING ---
 shortsRoute.get("/video/:filename", async (c) => {
 	const filename = c.req.param("filename");
-	if (!filename) {
-		return c.json({ error: "Missing filename" }, 400);
-	}
+	if (!filename) return c.json({ error: "Missing filename" }, 400);
 
 	try {
 		const s3Object = await getFromBucket("shorts", filename);
-
-		if (!s3Object.Body) {
-			return c.json({ error: "Video not found" }, 404);
-		}
+		if (!s3Object.Body) return c.json({ error: "Video not found" }, 404);
 
 		c.header("Content-Type", s3Object.ContentType || "video/mp4");
 		c.header("Cache-Control", "public, max-age=86400, must-revalidate");
@@ -268,50 +395,33 @@ shortsRoute.get("/video/:filename", async (c) => {
 	}
 });
 
-// --- 5. MODERATE / UNMODERATE SHORT (Moderator Action) ---
+// --- 7. MODERATE SHORT ---
 shortsRoute.patch("/:id/moderate", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
-
-	if (!(await isModerator(moderatorId))) {
-		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
-	}
+	if (!(await isModerator(moderatorId))) return c.json({ success: false, code: "FORBIDDEN" }, 403);
 
 	const shortId = c.req.param("id");
 	let body;
-
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ success: false, code: "INVALID_JSON" }, 400);
 	}
 
-	const { isModerated } = body;
-
-	if (typeof isModerated !== "boolean") {
-		return c.json({ success: false, code: "INVALID_IS_MODERATED_VALUE" }, 400);
-	}
+	if (typeof body.isModerated !== "boolean")
+		return c.json({ success: false, code: "INVALID" }, 400);
 
 	try {
 		const [updatedShort] = await database
 			.update(shorts)
-			.set({
-				isModerated,
-				updatedAt: new Date()
-			})
+			.set({ isModerated: body.isModerated, updatedAt: new Date() })
 			.where(eq(shorts.id, shortId))
 			.returning();
 
-		if (!updatedShort) {
-			return c.json({ success: false, code: "SHORT_NOT_FOUND" }, 404);
-		}
+		if (!updatedShort) return c.json({ success: false, code: "NOT_FOUND" }, 404);
 
-		return c.json({
-			success: true,
-			code: isModerated ? "SHORT_MODERATED" : "SHORT_UNMODERATED",
-			short: updatedShort
-		});
+		return c.json({ success: true, short: updatedShort });
 	} catch (error) {
-		console.error("Failed to moderate short:", error);
 		return c.json({ success: false, code: "UPDATE_FAILED" }, 500);
 	}
 });

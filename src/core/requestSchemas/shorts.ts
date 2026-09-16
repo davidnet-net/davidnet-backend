@@ -6,6 +6,14 @@ export const uploadVideoSchema = type({
 });
 
 export const getFeedSchema = type({
-	"limit?": "string",
-	"cursor?": "string"
+	"limit?": "number",
+	"seenIds?": "string[]"
+});
+
+export const watchMetricSchema = type({
+	watchDuration: "number"
+});
+
+export const likeMetricSchema = type({
+	liked: "boolean"
 });

@@ -12,7 +12,12 @@ RUN bun run build
 FROM oven/bun:1-slim
 WORKDIR /app
 
-# Copy built SvelteKit server and production dependencies
+# Install ffmpeg (required for get-video-duration on the backend)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy built server and production dependencies
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/meta/ ./meta/
 COPY --from=builder /app/src/core/constants/ ./src/core/constants/
