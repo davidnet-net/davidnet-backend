@@ -427,54 +427,53 @@ shortsRoute.patch("/:id/moderate", requireAuth, async (c) => {
 });
 
 // TEMPORARY MIGRATION ROUTE
+// TEMPORARY MIGRATION ROUTE
 shortsRoute.post("/admin/backfill-durations", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
+
 	if (!(await isModerator(moderatorId))) {
 		return c.json({ success: false, code: "FORBIDDEN" }, 403);
 	}
 
-	// Return immediately so the HTTP request doesn't timeout, run logic in background
-	c.executionCtx.waitUntil(
-		(async () => {
-			console.log("Starting background video duration backfill...");
-			try {
-				const videosToFix = await database
-					.select()
-					.from(shorts)
-					.where(or(eq(shorts.videoLength, 0), eq(shorts.videoLength, 15)));
+	// Standard Bun/Node way to run a background task without blocking the HTTP response
+	setTimeout(async () => {
+		console.log("Starting background video duration backfill...");
+		try {
+			const videosToFix = await database
+				.select()
+				.from(shorts)
+				.where(or(eq(shorts.videoLength, 0), eq(shorts.videoLength, 15)));
 
-				for (const video of videosToFix) {
-					try {
-						const urlParts = video.videoUrl.split("/");
-						const filename = urlParts[urlParts.length - 1];
-						const s3Object = await getFromBucket("shorts", filename);
+			for (const video of videosToFix) {
+				try {
+					const urlParts = video.videoUrl.split("/");
+					const filename = urlParts[urlParts.length - 1];
+					const s3Object = await getFromBucket("shorts", filename);
 
-						if (s3Object.Body) {
-							const arrayBuffer = await s3Object.Body.transformToByteArray();
-							const buffer = Buffer.from(arrayBuffer);
-							const stream = Readable.from(buffer);
+					if (s3Object.Body) {
+						const arrayBuffer = await s3Object.Body.transformToByteArray();
+						const buffer = Buffer.from(arrayBuffer);
+						const stream = Readable.from(buffer);
 
-							// NOTE: make sure get-video-duration and Readable are imported at the top!
-							const duration = await getVideoDurationInSeconds(stream);
-							const actualLength = Math.max(1, Math.round(duration));
+						const duration = await getVideoDurationInSeconds(stream);
+						const actualLength = Math.max(1, Math.round(duration));
 
-							await database
-								.update(shorts)
-								.set({ videoLength: actualLength })
-								.where(eq(shorts.id, video.id));
+						await database
+							.update(shorts)
+							.set({ videoLength: actualLength })
+							.where(eq(shorts.id, video.id));
 
-							console.log(`✅ Fixed ${video.id} -> ${actualLength}s`);
-						}
-					} catch (err) {
-						console.error(`❌ Failed on ${video.id}:`, err);
+						console.log(`✅ Fixed ${video.id} -> ${actualLength}s`);
 					}
+				} catch (err) {
+					console.error(`❌ Failed on ${video.id}:`, err);
 				}
-				console.log("Backfill complete!");
-			} catch (error) {
-				console.error("Backfill crashed:", error);
 			}
-		})()
-	);
+			console.log("Backfill complete!");
+		} catch (error) {
+			console.error("Backfill crashed:", error);
+		}
+	}, 0);
 
 	return c.json({ success: true, message: "Backfill started in the background. Check pod logs." });
 });
