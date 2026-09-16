@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gt } from "drizzle-orm";
 import { Hono } from "hono";
 import { type } from "arktype";
 
@@ -117,7 +117,7 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 		);
 	} catch (error) {
 		console.error("Failed to submit report:", error);
-		return c.json({ success: false, code: "REPORT_SUBMISSION_FAILED" }, 500);
+		return c.json({ success: false, code: "REPORT_MISSION_FAILED" }, 500);
 	}
 });
 
@@ -528,6 +528,58 @@ moderationRoute.get("/users/:userId/violations", requireAuth, async (c) => {
 		});
 	} catch (error) {
 		console.error("Failed to fetch target user violations:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 11. GET ALL PLATFORM VIOLATIONS (Moderator Dashboard) ---
+moderationRoute.get("/violations/all", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	try {
+		const allViolations = await database
+			.select()
+			.from(violations)
+			.orderBy(desc(violations.createdAt));
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			violations: allViolations
+		});
+	} catch (error) {
+		console.error("Failed to fetch platform violations:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 12. GET ALL ACTIVE PLATFORM BANS (Moderator Dashboard) ---
+moderationRoute.get("/bans/all", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	try {
+		const now = new Date();
+		const activeBans = await database
+			.select()
+			.from(accountModerationStatus)
+			.where(gt(accountModerationStatus.bannedUntil, now))
+			.orderBy(desc(accountModerationStatus.updatedAt));
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			bannedUsers: activeBans
+		});
+	} catch (error) {
+		console.error("Failed to fetch active platform bans:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
 	}
 });
