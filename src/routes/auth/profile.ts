@@ -3,13 +3,36 @@ import { Hono } from "hono";
 import countryList from "country-list";
 
 import { database } from "../../core/database/client";
-import { users, userPreferences, userPrivacyPreferences } from "../../core/database/schema/schema";
+import {
+	users,
+	userPreferences,
+	userPrivacyPreferences,
+	internalAccess
+} from "../../core/database/schema/schema";
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
 import { collectAuth } from "../../middlewares/collectAuth";
 import { uploadToBucket, getFromBucket } from "../../core/shared/s3";
 import { userConnections } from "../../core/database/schema/connections";
 
 export const profile = new Hono<Env>();
+
+// --- HELPER: CHECK MODERATOR PERMISSIONS ---
+async function isModerator(userId: string): Promise<boolean> {
+	const [access] = await database
+		.select({
+			internalAccess: internalAccess.internalAccess,
+			supportAccess: internalAccess.supportAccess
+		})
+		.from(internalAccess)
+		.where(eq(internalAccess.userId, userId))
+		.limit(1);
+
+	return Boolean(access && access.internalAccess && access.supportAccess);
+}
+
+// ============================================================================
+// PUBLIC & USER ENDPOINTS
+// ============================================================================
 
 profile.get("/", collectAuth, async (c) => {
 	const requestedIdentifier = c.req.query("user");
@@ -327,3 +350,59 @@ async function handleImageRetrieval(c: any, type: "avatar" | "banner") {
 // --- DELIVERY ENDPOINTS ---
 profile.get("/avatar/:filename", async (c) => handleImageRetrieval(c, "avatar"));
 profile.get("/banner/:filename", async (c) => handleImageRetrieval(c, "banner"));
+
+// ============================================================================
+// MODERATOR ENDPOINTS
+// ============================================================================
+
+// --- CLEAR USER GENERATED CONTENT (UGC) ---
+profile.patch("/:userId/clear-ugc", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const targetUserId = c.req.param("userId");
+
+	try {
+		// Fetch the user to get their immutable username
+		const [targetUser] = await database
+			.select({ username: users.username })
+			.from(users)
+			.where(eq(users.userId, targetUserId))
+			.limit(1);
+
+		if (!targetUser) {
+			return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
+		}
+
+		// Wipe volatile profile fields and reset displayName to username
+		const [updatedUser] = await database
+			.update(users)
+			.set({
+				displayName: targetUser.username, // Fallback to raw username
+				description: "CONTENT_DELETED",
+				avatarUrl: null,
+				bannerUrl: null,
+				location: null,
+				updatedAt: new Date()
+			})
+			.where(eq(users.userId, targetUserId))
+			.returning({
+				userId: users.userId,
+				username: users.username,
+				displayName: users.displayName,
+				description: users.description
+			});
+
+		return c.json({
+			success: true,
+			code: "UGC_CLEARED",
+			user: updatedUser
+		});
+	} catch (error) {
+		console.error("Failed to clear UGC:", error);
+		return c.json({ success: false, code: "UPDATE_FAILED" }, 500);
+	}
+});
