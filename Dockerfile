@@ -1,10 +1,8 @@
 # Stage 1: Build the application
 FROM oven/bun:1 AS builder
 WORKDIR /app
-
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
-
 COPY . .
 RUN bun run build
 
@@ -25,6 +23,9 @@ COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/drizzle/ ./drizzle/
 COPY --from=builder /app/drizzle.config.ts ./
+
+# FIX: Explicitly grant execute permissions to the ffprobe binary
+RUN chmod +x /app/node_modules/@ffprobe-installer/linux-x64/ffprobe
 
 EXPOSE 3000
 ENV PORT=3000
