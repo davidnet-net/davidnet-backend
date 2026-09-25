@@ -422,6 +422,12 @@ communityGamesRoute.get("/:id/file/*", async (c) => {
 		c.header("Content-Type", s3Object.ContentType || "application/octet-stream");
 		c.header("Cache-Control", "public, max-age=86400");
 
+		// Expliciete CSP headers voor iframe game isolatie om CSP fouten en Cloudflare spam te voorkomen
+		c.header(
+			"Content-Security-Policy",
+			"default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src * data: blob:; media-src * data: blob:; font-src * data:; style-src 'self' 'unsafe-inline';"
+		);
+
 		return c.body(s3Object.Body.transformToWebStream());
 	} catch (error) {
 		return c.json({ error: "File not found" }, 404);
