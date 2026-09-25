@@ -1,4 +1,9 @@
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import {
+	S3Client,
+	PutObjectCommand,
+	GetObjectCommand,
+	ListObjectsV2Command
+} from "@aws-sdk/client-s3";
 
 export const s3 = new S3Client({
 	region: "garage",
@@ -34,4 +39,16 @@ export async function getFromBucket(bucket: string, key: string) {
 		})
 	);
 	return response;
+}
+
+export async function listBucketObjects(bucket: string, prefix: string): Promise<string[]> {
+	const response = await s3.send(
+		new ListObjectsV2Command({
+			Bucket: bucket,
+			Prefix: prefix
+		})
+	);
+	return (response.Contents || [])
+		.map((item) => item.Key)
+		.filter((key): key is string => Boolean(key));
 }
