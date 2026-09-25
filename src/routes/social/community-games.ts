@@ -1,6 +1,7 @@
 import { eq, and, desc, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import AdmZip from "adm-zip";
+import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 
 import { database } from "../../core/database/client";
 import {
@@ -17,7 +18,7 @@ import { uploadToBucket, getFromBucket } from "../../core/shared/s3";
 export const communityGamesRoute = new Hono<Env>();
 
 // --- HELPER: CHECK IF USER IS BANNED ---
-async function checkIfBanned(userId: string): Promise<boolean> {
+async function checkIfBanned(userId: string, c: any): Promise<boolean> {
 	try {
 		const [status] = await database
 			.select()
@@ -25,7 +26,9 @@ async function checkIfBanned(userId: string): Promise<boolean> {
 			.where(eq(accountModerationStatus.userId, userId))
 			.limit(1);
 
-		if (!status || !status.bannedUntil) return false;
+		if (!status || !status.bannedUntil) {
+			return false;
+		}
 
 		const now = new Date();
 		const bannedUntilDate = new Date(status.bannedUntil);
@@ -35,6 +38,7 @@ async function checkIfBanned(userId: string): Promise<boolean> {
 				.update(accountModerationStatus)
 				.set({ bannedUntil: null, updatedAt: now })
 				.where(eq(accountModerationStatus.userId, userId));
+
 			return false;
 		}
 
@@ -63,7 +67,7 @@ async function isModerator(userId: string): Promise<boolean> {
 communityGamesRoute.post("/upload", requireAuth, async (c) => {
 	const userId = c.get("user").id;
 
-	if (await checkIfBanned(userId)) {
+	if (await checkIfBanned(userId, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
@@ -153,10 +157,10 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 	}
 });
 
-// --- 2. GET COMMUNITY GAMES FEED (Hides moderated games) ---
+// --- 2. GET COMMUNITY GAMES FEED ---
 communityGamesRoute.get("/feed", collectAuth, async (c) => {
 	const user = c.get("user");
-	if (user && (await checkIfBanned(user.id))) {
+	if (user && (await checkIfBanned(user.id, c))) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
@@ -189,7 +193,9 @@ communityGamesRoute.get("/feed", collectAuth, async (c) => {
 communityGamesRoute.post("/:id/like", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (!user) return c.json({ success: false, code: "UNAUTHORIZED" }, 401);
-	if (await checkIfBanned(user.id)) return c.json({ success: false, code: "BANNED" }, 403);
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
 
 	const gameId = c.req.param("id");
 	let body;
@@ -230,9 +236,13 @@ communityGamesRoute.post("/:id/like", collectAuth, async (c) => {
 	}
 });
 
-// --- 4. DELETE COMMUNITY GAME (Only original uploader can delete, mods cannot) ---
+// --- 4. DELETE COMMUNITY GAME ---
 communityGamesRoute.delete("/:id", requireAuth, async (c) => {
 	const userId = c.get("user").id;
+	if (await checkIfBanned(userId, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
 	const gameId = c.req.param("id");
 
 	try {
@@ -259,10 +269,10 @@ communityGamesRoute.delete("/:id", requireAuth, async (c) => {
 	}
 });
 
-// --- 5. GET SINGLE COMMUNITY GAME (Includes isLiked check for current user) ---
+// --- 5. GET SINGLE COMMUNITY GAME (PLAY PAGE) ---
 communityGamesRoute.get("/:id", collectAuth, async (c) => {
 	const user = c.get("user");
-	if (user && (await checkIfBanned(user.id))) {
+	if (user && (await checkIfBanned(user.id, c))) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
@@ -352,7 +362,50 @@ communityGamesRoute.patch("/:id/moderate", requireAuth, async (c) => {
 	}
 });
 
-// --- 7. SERVE GAME FILES (FOR THE IFRAME) ---
+// --- 7. GET COMMUNITY GAME FILE LIST (Mods only) ---
+communityGamesRoute.get("/:id/files", requireAuth, async (c) => {
+	const userId = c.get("user").id;
+	if (await checkIfBanned(userId, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+	if (!(await isModerator(userId))) {
+		return c.json({ success: false, code: "FORBIDDEN" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+	try {
+		const s3 = new S3Client({
+			region: process.env.AWS_REGION || "us-east-1",
+			credentials: {
+				accessKeyId: process.env.AWS_ACCESS_KEY_ID || "",
+				secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ""
+			},
+			...(process.env.AWS_ENDPOINT
+				? { endpoint: process.env.AWS_ENDPOINT, forcePathStyle: true }
+				: {})
+		});
+
+		const command = new ListObjectsV2Command({
+			Bucket: process.env.S3_BUCKET_COMMUNITYGAMES || "communitygames",
+			Prefix: `${gameId}/`
+		});
+
+		const response = await s3.send(command);
+		const files = (response.Contents || [])
+			.map((item) => {
+				const key = item.Key || "";
+				return key.replace(`${gameId}/`, "");
+			})
+			.filter(Boolean);
+
+		return c.json({ success: true, files });
+	} catch (error) {
+		console.error("Failed to list game files:", error);
+		return c.json({ success: false, code: "LIST_FILES_FAILED" }, 500);
+	}
+});
+
+// --- 8. SERVE GAME FILES (FOR THE IFRAME) ---
 communityGamesRoute.get("/:id/file/*", async (c) => {
 	const id = c.req.param("id");
 	const url = new URL(c.req.url);
