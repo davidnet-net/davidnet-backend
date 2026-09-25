@@ -1,7 +1,6 @@
 import { eq, and, desc, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import AdmZip from "adm-zip";
-import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 
 import { database } from "../../core/database/client";
 import {
@@ -13,7 +12,7 @@ import {
 } from "../../core/database/schema/schema";
 import { type Env, requireAuth } from "../../middlewares/requireAuth";
 import { collectAuth } from "../../middlewares/collectAuth";
-import { uploadToBucket, getFromBucket } from "../../core/shared/s3";
+import { uploadToBucket, getFromBucket, listBucketObjects } from "../../core/shared/s3";
 
 export const communityGamesRoute = new Hono<Env>();
 
@@ -374,29 +373,8 @@ communityGamesRoute.get("/:id/files", requireAuth, async (c) => {
 
 	const gameId = c.req.param("id");
 	try {
-		const s3 = new S3Client({
-			region: process.env.AWS_REGION || "us-east-1",
-			credentials: {
-				accessKeyId: process.env.AWS_ACCESS_KEY_ID || "",
-				secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ""
-			},
-			...(process.env.AWS_ENDPOINT
-				? { endpoint: process.env.AWS_ENDPOINT, forcePathStyle: true }
-				: {})
-		});
-
-		const command = new ListObjectsV2Command({
-			Bucket: process.env.S3_BUCKET_COMMUNITYGAMES || "communitygames",
-			Prefix: `${gameId}/`
-		});
-
-		const response = await s3.send(command);
-		const files = (response.Contents || [])
-			.map((item) => {
-				const key = item.Key || "";
-				return key.replace(`${gameId}/`, "");
-			})
-			.filter(Boolean);
+		const rawKeys = await listBucketObjects("communitygames", `${gameId}/`);
+		const files = rawKeys.map((key) => key.replace(`${gameId}/`, "")).filter(Boolean);
 
 		return c.json({ success: true, files });
 	} catch (error) {
@@ -422,7 +400,6 @@ communityGamesRoute.get("/:id/file/*", async (c) => {
 		c.header("Content-Type", s3Object.ContentType || "application/octet-stream");
 		c.header("Cache-Control", "public, max-age=86400");
 
-		// Expliciete CSP headers voor iframe game isolatie om CSP fouten en Cloudflare spam te voorkomen
 		c.header(
 			"Content-Security-Policy",
 			"default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src * data: blob:; media-src * data: blob:; font-src * data:; style-src 'self' 'unsafe-inline';"
