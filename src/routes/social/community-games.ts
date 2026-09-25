@@ -246,7 +246,6 @@ communityGamesRoute.delete("/:id", requireAuth, async (c) => {
 			return c.json({ success: false, code: "NOT_FOUND" }, 404);
 		}
 
-		// Alleen de echte uploader mag verwijderen (mods kunnen dit niet via deze route)
 		if (game.userId !== userId) {
 			return c.json({ success: false, code: "FORBIDDEN" }, 403);
 		}
@@ -260,7 +259,7 @@ communityGamesRoute.delete("/:id", requireAuth, async (c) => {
 	}
 });
 
-// --- 5. GET SINGLE COMMUNITY GAME ---
+// --- 5. GET SINGLE COMMUNITY GAME (Includes isLiked check for current user) ---
 communityGamesRoute.get("/:id", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (user && (await checkIfBanned(user.id))) {
@@ -294,7 +293,25 @@ communityGamesRoute.get("/:id", collectAuth, async (c) => {
 
 		if (!game) return c.json({ success: false, code: "GAME_NOT_FOUND" }, 404);
 
-		return c.json({ success: true, code: "SUCCESS", game });
+		let isLiked = false;
+		if (user) {
+			const [likeRecord] = await database
+				.select({ userId: communityGameLikes.userId })
+				.from(communityGameLikes)
+				.where(and(eq(communityGameLikes.userId, user.id), eq(communityGameLikes.gameId, id)))
+				.limit(1);
+
+			isLiked = Boolean(likeRecord);
+		}
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			game: {
+				...game,
+				isLiked
+			}
+		});
 	} catch (error) {
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
 	}
