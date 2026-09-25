@@ -1,0 +1,1 @@
+ALTER TYPE "auth"."report_type" ADD VALUE 'game';
