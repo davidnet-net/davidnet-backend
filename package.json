@@ -15,6 +15,7 @@
 		"@eslint/js": "^10.0.1",
 		"@hono/standard-validator": "^0.2.2",
 		"@types/country-list": "^2.1.4",
+		"adm-zip": "^0.6.1",
 		"arktype": "^2.2.0",
 		"country-list": "^2.4.1",
 		"drizzle-orm": "^0.45.1",
