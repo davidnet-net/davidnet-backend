@@ -1,4 +1,5 @@
 import { and, desc, eq, gt } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { Hono } from "hono";
 import { type } from "arktype";
 
@@ -23,6 +24,7 @@ import { requireAuth, type Env } from "../../middlewares/requireAuth";
 
 export const moderationRoute = new Hono<Env>();
 
+// --- HELPER: CHECK MODERATOR PERMISSIONS ---
 async function isModerator(userId: string): Promise<boolean> {
 	const [access] = await database
 		.select({
@@ -36,6 +38,11 @@ async function isModerator(userId: string): Promise<boolean> {
 	return Boolean(access && access.internalAccess && access.supportAccess);
 }
 
+// ============================================================================
+// USER ENDPOINTS
+// ============================================================================
+
+// --- 1. SUBMIT A REPORT ---
 moderationRoute.post("/report", requireAuth, async (c) => {
 	const reporterId = c.get("user").id;
 	let body;
@@ -127,6 +134,7 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 	}
 });
 
+// --- 2. GET MY REPORTS LIST ---
 moderationRoute.get("/reports/me", requireAuth, async (c) => {
 	const reporterId = c.get("user").id;
 
@@ -156,6 +164,7 @@ moderationRoute.get("/reports/me", requireAuth, async (c) => {
 	}
 });
 
+// --- 3. GET MY VIOLATIONS LIST ---
 moderationRoute.get("/violations/me", requireAuth, async (c) => {
 	const userId = c.get("user").id;
 
@@ -184,6 +193,7 @@ moderationRoute.get("/violations/me", requireAuth, async (c) => {
 	}
 });
 
+// --- 4. CHECK CURRENT USER BAN STATUS ---
 moderationRoute.get("/me/ban-status", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (!user) {
@@ -224,6 +234,11 @@ moderationRoute.get("/me/ban-status", collectAuth, async (c) => {
 	}
 });
 
+// ============================================================================
+// MODERATOR ENDPOINTS (Requires internalAccess AND supportAccess)
+// ============================================================================
+
+// --- 5. GET REPORTS LIST (Met volledige profiel info via alias) ---
 moderationRoute.get("/reports", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -234,6 +249,8 @@ moderationRoute.get("/reports", requireAuth, async (c) => {
 	const statusQuery = c.req.query("status");
 
 	try {
+		const reportedUser = alias(users, "reported_user");
+
 		let query = database
 			.select({
 				id: reports.id,
@@ -244,10 +261,13 @@ moderationRoute.get("/reports", requireAuth, async (c) => {
 				createdAt: reports.createdAt,
 				reporterUsername: users.username,
 				reporterDisplayName: users.displayName,
-				reportedUserId: reports.reportedUserId
+				reportedUserId: reports.reportedUserId,
+				reportedUsername: reportedUser.username,
+				reportedDisplayName: reportedUser.displayName
 			})
 			.from(reports)
 			.innerJoin(users, eq(reports.reporterId, users.userId))
+			.innerJoin(reportedUser, eq(reports.reportedUserId, reportedUser.userId))
 			.orderBy(desc(reports.createdAt));
 
 		if (statusQuery && ["pending", "resolved", "dismissed"].includes(statusQuery)) {
@@ -269,6 +289,7 @@ moderationRoute.get("/reports", requireAuth, async (c) => {
 	}
 });
 
+// --- 6. UPDATE REPORT STATUS ---
 moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -329,6 +350,7 @@ moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
 	}
 });
 
+// --- 7. CREATE VIOLATION / STRIKE ---
 moderationRoute.post("/violations", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -390,6 +412,7 @@ moderationRoute.post("/violations", requireAuth, async (c) => {
 	}
 });
 
+// --- 8. BAN OR UNBAN A USER ---
 moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -448,6 +471,7 @@ moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 	}
 });
 
+// --- 9. GET TARGET USER BAN STATUS ---
 moderationRoute.get("/users/:userId/ban-status", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -491,6 +515,7 @@ moderationRoute.get("/users/:userId/ban-status", requireAuth, async (c) => {
 	}
 });
 
+// --- 10. GET TARGET USER VIOLATIONS ---
 moderationRoute.get("/users/:userId/violations", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -525,6 +550,7 @@ moderationRoute.get("/users/:userId/violations", requireAuth, async (c) => {
 	}
 });
 
+// --- 11. GET ALL PLATFORM VIOLATIONS ---
 moderationRoute.get("/violations/all", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -549,6 +575,7 @@ moderationRoute.get("/violations/all", requireAuth, async (c) => {
 	}
 });
 
+// --- 12. GET ALL ACTIVE PLATFORM BANS ---
 moderationRoute.get("/bans/all", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
