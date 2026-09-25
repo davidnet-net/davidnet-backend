@@ -9,7 +9,8 @@ import {
 	reports,
 	users,
 	shorts,
-	violations
+	violations,
+	communityGame
 } from "../../core/database/schema/schema";
 import {
 	createReportSchema,
@@ -22,7 +23,6 @@ import { requireAuth, type Env } from "../../middlewares/requireAuth";
 
 export const moderationRoute = new Hono<Env>();
 
-// --- HELPER: CHECK MODERATOR PERMISSIONS ---
 async function isModerator(userId: string): Promise<boolean> {
 	const [access] = await database
 		.select({
@@ -36,11 +36,6 @@ async function isModerator(userId: string): Promise<boolean> {
 	return Boolean(access && access.internalAccess && access.supportAccess);
 }
 
-// ============================================================================
-// USER ENDPOINTS
-// ============================================================================
-
-// --- 1. SUBMIT A REPORT ---
 moderationRoute.post("/report", requireAuth, async (c) => {
 	const reporterId = c.get("user").id;
 	let body;
@@ -91,6 +86,17 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 				return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
 			}
 			actualReportedUserId = targetUser.userId;
+		} else if (reportType === "game") {
+			const [targetGame] = await database
+				.select({ userId: communityGame.userId })
+				.from(communityGame)
+				.where(eq(communityGame.id, reportedId))
+				.limit(1);
+
+			if (!targetGame) {
+				return c.json({ success: false, code: "GAME_NOT_FOUND" }, 404);
+			}
+			actualReportedUserId = targetGame.userId;
 		} else {
 			return c.json({ success: false, code: "INVALID_REPORT_TYPE" }, 400);
 		}
@@ -100,7 +106,7 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 			.values({
 				reporterId,
 				reportedUserId: actualReportedUserId,
-				reportType: reportType as "profile" | "short",
+				reportType: reportType as "profile" | "short" | "game",
 				reportedId,
 				reason: reason.trim(),
 				status: "pending"
@@ -121,7 +127,6 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 	}
 });
 
-// --- 2. GET MY REPORTS LIST ---
 moderationRoute.get("/reports/me", requireAuth, async (c) => {
 	const reporterId = c.get("user").id;
 
@@ -151,7 +156,6 @@ moderationRoute.get("/reports/me", requireAuth, async (c) => {
 	}
 });
 
-// --- 3. GET MY VIOLATIONS LIST ---
 moderationRoute.get("/violations/me", requireAuth, async (c) => {
 	const userId = c.get("user").id;
 
@@ -180,7 +184,6 @@ moderationRoute.get("/violations/me", requireAuth, async (c) => {
 	}
 });
 
-// --- 4. CHECK CURRENT USER BAN STATUS ---
 moderationRoute.get("/me/ban-status", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (!user) {
@@ -221,11 +224,6 @@ moderationRoute.get("/me/ban-status", collectAuth, async (c) => {
 	}
 });
 
-// ============================================================================
-// MODERATOR ENDPOINTS (Requires internalAccess AND supportAccess)
-// ============================================================================
-
-// --- 5. GET REPORTS LIST (Moderator Dashboard Queue) ---
 moderationRoute.get("/reports", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -271,7 +269,6 @@ moderationRoute.get("/reports", requireAuth, async (c) => {
 	}
 });
 
-// --- 6. UPDATE REPORT STATUS (Bulk updates matching reported items) ---
 moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -332,7 +329,6 @@ moderationRoute.patch("/reports/:id/status", requireAuth, async (c) => {
 	}
 });
 
-// --- 7. CREATE VIOLATION / STRIKE ---
 moderationRoute.post("/violations", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -373,7 +369,7 @@ moderationRoute.post("/violations", requireAuth, async (c) => {
 			.insert(violations)
 			.values({
 				userId,
-				reportedType: reportedType as "profile" | "short",
+				reportedType: reportedType as "profile" | "short" | "game",
 				reportedId,
 				reason: reason.trim(),
 				moderatorReason: typeof moderatorReason === "string" ? moderatorReason.trim() : null
@@ -394,7 +390,6 @@ moderationRoute.post("/violations", requireAuth, async (c) => {
 	}
 });
 
-// --- 8. BAN OR UNBAN A USER ---
 moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -453,7 +448,6 @@ moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 	}
 });
 
-// --- 9. GET TARGET USER BAN STATUS (Moderator Action) ---
 moderationRoute.get("/users/:userId/ban-status", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -497,7 +491,6 @@ moderationRoute.get("/users/:userId/ban-status", requireAuth, async (c) => {
 	}
 });
 
-// --- 10. GET TARGET USER VIOLATIONS (Moderator Action) ---
 moderationRoute.get("/users/:userId/violations", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -532,7 +525,6 @@ moderationRoute.get("/users/:userId/violations", requireAuth, async (c) => {
 	}
 });
 
-// --- 11. GET ALL PLATFORM VIOLATIONS (Moderator Dashboard) ---
 moderationRoute.get("/violations/all", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 
@@ -557,7 +549,6 @@ moderationRoute.get("/violations/all", requireAuth, async (c) => {
 	}
 });
 
-// --- 12. GET ALL ACTIVE PLATFORM BANS (Moderator Dashboard) ---
 moderationRoute.get("/bans/all", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
 

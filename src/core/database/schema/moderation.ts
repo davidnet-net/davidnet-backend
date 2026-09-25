@@ -3,7 +3,7 @@ import { integer, pgSchema, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { authSchema, users } from "./auth";
 
 // --- ENUMS ---
-export const reportTypeEnum = authSchema.enum("report_type", ["profile", "short"]);
+export const reportTypeEnum = authSchema.enum("report_type", ["profile", "short", "game"]);
 export const reportStatusEnum = authSchema.enum("report_status", [
 	"pending",
 	"resolved",

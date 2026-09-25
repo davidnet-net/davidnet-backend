@@ -1,7 +1,7 @@
 import { type } from "arktype";
 
 export const createReportSchema = type({
-	reportType: "'profile' | 'short'",
+	reportType: "'profile' | 'short' | 'game'",
 	reportedId: "string",
 	reason: "string"
 });
@@ -22,7 +22,7 @@ export const banUserSchema = type({
 
 export const createViolationSchema = type({
 	userId: "string",
-	reportedType: "'profile' | 'short'",
+	reportedType: "'profile' | 'short' | 'game'",
 	reportedId: "string",
 	reason: "string",
 	"moderatorReason?": "string"
