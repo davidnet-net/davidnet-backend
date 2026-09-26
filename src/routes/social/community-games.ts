@@ -119,18 +119,65 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 			const filePath = entry.entryName;
 			if (filePath === "index.html") hasIndexHtml = true;
 
-			const fileData = entry.getData();
+			// Use 'let' so we can overwrite fileData if it's an HTML file
+			let fileData = entry.getData();
 			const s3Key = `${gameId}/${filePath}`;
 
 			let contentType = "application/octet-stream";
-			if (filePath.endsWith(".html")) contentType = "text/html";
-			else if (filePath.endsWith(".css")) contentType = "text/css";
-			else if (filePath.endsWith(".js")) contentType = "application/javascript";
-			else if (filePath.endsWith(".png")) contentType = "image/png";
-			else if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) contentType = "image/jpeg";
-			else if (filePath.endsWith(".mp3")) contentType = "audio/mpeg";
-			else if (filePath.endsWith(".wav")) contentType = "audio/wav";
-			else if (filePath.endsWith(".svg")) contentType = "image/svg+xml";
+
+			// Inject LocalStorage Polyfill into HTML files
+			if (filePath.endsWith(".html")) {
+				contentType = "text/html";
+
+				let htmlContent = fileData.toString("utf-8");
+
+				// Safe in-memory storage mock that prevents the game from crashing
+				const storagePolyfill = `
+                <script>
+                    (function() {
+                        try {
+                            var memStorage = {};
+                            var mockStorage = {
+                                getItem: function(k) { return memStorage.hasOwnProperty(k) ? memStorage[k] : null; },
+                                setItem: function(k, v) { memStorage[k] = String(v); },
+                                removeItem: function(k) { delete memStorage[k]; },
+                                clear: function() { memStorage = {}; },
+                                key: function(i) { return Object.keys(memStorage)[i] || null; },
+                                get length() { return Object.keys(memStorage).length; }
+                            };
+                            Object.defineProperty(window, 'localStorage', { value: mockStorage, configurable: true, writable: true });
+                            Object.defineProperty(window, 'sessionStorage', { value: mockStorage, configurable: true, writable: true });
+                        } catch(e) {
+                            console.warn("Could not polyfill storage");
+                        }
+                    })();
+                </script>
+                `;
+
+				// Plaats het script direct na de <head> tag of helemaal bovenaan
+				if (htmlContent.toLowerCase().includes("<head>")) {
+					htmlContent = htmlContent.replace(/<head>/i, "<head>\n" + storagePolyfill);
+				} else {
+					htmlContent = storagePolyfill + htmlContent;
+				}
+
+				// Zet de aangepaste string weer om naar een Buffer voor S3
+				fileData = Buffer.from(htmlContent, "utf-8");
+			} else if (filePath.endsWith(".css")) {
+				contentType = "text/css";
+			} else if (filePath.endsWith(".js")) {
+				contentType = "application/javascript";
+			} else if (filePath.endsWith(".png")) {
+				contentType = "image/png";
+			} else if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) {
+				contentType = "image/jpeg";
+			} else if (filePath.endsWith(".mp3")) {
+				contentType = "audio/mpeg";
+			} else if (filePath.endsWith(".wav")) {
+				contentType = "audio/wav";
+			} else if (filePath.endsWith(".svg")) {
+				contentType = "image/svg+xml";
+			}
 
 			await uploadToBucket("communitygames", s3Key, fileData, contentType);
 		});
@@ -155,7 +202,6 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 		return c.json({ success: false, code: "UPLOAD_FAILED" }, 500);
 	}
 });
-
 // --- 2. GET COMMUNITY GAMES FEED ---
 communityGamesRoute.get("/feed", collectAuth, async (c) => {
 	const user = c.get("user");
