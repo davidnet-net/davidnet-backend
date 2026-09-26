@@ -11,7 +11,6 @@ import {
 	users
 } from "../../core/database/schema/schema";
 import { type Env, requireAuth } from "../../middlewares/requireAuth";
-import { collectAuth } from "../../middlewares/collectAuth";
 import { uploadToBucket, getFromBucket, listBucketObjects } from "../../core/shared/s3";
 
 export const communityGamesRoute = new Hono<Env>();
@@ -203,7 +202,7 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 	}
 });
 // --- 2. GET COMMUNITY GAMES FEED ---
-communityGamesRoute.get("/feed", collectAuth, async (c) => {
+communityGamesRoute.get("/feed", requireAuth, async (c) => {
 	const user = c.get("user");
 	if (user && (await checkIfBanned(user.id, c))) {
 		return c.json({ success: false, code: "BANNED" }, 403);
@@ -235,7 +234,7 @@ communityGamesRoute.get("/feed", collectAuth, async (c) => {
 });
 
 // --- 3. LIKE / UNLIKE COMMUNITY GAME ---
-communityGamesRoute.post("/:id/like", collectAuth, async (c) => {
+communityGamesRoute.post("/:id/like", requireAuth, async (c) => {
 	const user = c.get("user");
 	if (!user) return c.json({ success: false, code: "UNAUTHORIZED" }, 401);
 	if (await checkIfBanned(user.id, c)) {
@@ -315,7 +314,7 @@ communityGamesRoute.delete("/:id", requireAuth, async (c) => {
 });
 
 // --- 5. GET SINGLE COMMUNITY GAME (PLAY PAGE) ---
-communityGamesRoute.get("/:id", collectAuth, async (c) => {
+communityGamesRoute.get("/:id", requireAuth, async (c) => {
 	const user = c.get("user");
 	if (user && (await checkIfBanned(user.id, c))) {
 		return c.json({ success: false, code: "BANNED" }, 403);

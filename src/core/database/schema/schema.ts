@@ -9,3 +9,4 @@ export * from "./quiz";
 export * from "./shorts";
 export * from "./moderation";
 export * from "./communityGames";
+export * from "./legal";
