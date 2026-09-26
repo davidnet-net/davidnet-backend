@@ -400,13 +400,18 @@ communityGamesRoute.get("/:id/file/*", async (c) => {
 		c.header("Content-Type", s3Object.ContentType || "application/octet-stream");
 		c.header("Cache-Control", "public, max-age=86400");
 
-		// Allow CORS for the null origin iframe so games can fetch their own relative assets
+		// Allow CORS requests from the sandboxed opaque (null) origin
 		c.header("Access-Control-Allow-Origin", "*");
 
-		// Update CSP to allow external CDNs (Tailwind, Google Fonts, etc.)
+		// Permissive CSP for external assets (Tailwind, Google Fonts) while restricting origin privilege
 		c.header(
 			"Content-Security-Policy",
-			"default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; img-src * data: blob:; media-src * data: blob:; font-src * data:; style-src * 'unsafe-inline'; script-src * 'unsafe-inline' 'unsafe-eval';"
+			"default-src * https: http: 'unsafe-inline' 'unsafe-eval' data: blob:; " +
+				"img-src * https: http: data: blob:; " +
+				"media-src * https: http: data: blob:; " +
+				"font-src * https: http: data:; " +
+				"style-src * https: http: 'unsafe-inline'; " +
+				"script-src * https: http: 'unsafe-inline' 'unsafe-eval';"
 		);
 
 		return c.body(s3Object.Body.transformToWebStream());
