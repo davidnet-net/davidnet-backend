@@ -1,5 +1,5 @@
 import { sValidator } from "@hono/standard-validator";
-import { eq, or } from "drizzle-orm";
+import { desc, eq, or } from "drizzle-orm";
 import { Hono } from "hono";
 import { setCookie } from "hono/cookie";
 
@@ -13,6 +13,7 @@ import {
 	users,
 	workspaces
 } from "../../core/database/schema/schema";
+import { legalRepoSync, userLegalAcceptances } from "../../core/database/schema/legal";
 import {
 	changeSignupEmailSchema,
 	initialPreferencesSchema,
@@ -169,9 +170,29 @@ signup.post(
 			reportTrustScore: 100
 		});
 
+		// Record legal acceptance using the active commit hash
+		const latestSync = await database
+			.select()
+			.from(legalRepoSync)
+			.orderBy(desc(legalRepoSync.lastCheckedAt))
+			.limit(1);
+
+		if (latestSync.length > 0) {
+			const activeCommitHash = latestSync[0].lastCommitHash;
+			const userAgent = c.req.header("user-agent") || "unknown";
+			const ip = c.req.header("x-forwarded-for") || "127.0.0.1";
+
+			await database.insert(userLegalAcceptances).values({
+				userId: userInsertion[0].userID,
+				commitHash: activeCommitHash,
+				ip,
+				userAgent
+			});
+		}
+
 		sendSignupVerifyEmail(signupStatusInsertion[0].emailVerificationToken, userInsertion[0].email);
 
-		await createUserAuditLog(userInsertion[0].userID, "Account created.");
+		await createUserAuditLog(userInsertion[0].userID, "Account created and legal terms accepted.");
 
 		return c.json(
 			{
