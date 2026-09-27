@@ -152,7 +152,7 @@ shortsRoute.post("/", requireAuth, async (c) => {
 	}
 });
 
-// --- 2. GET SHORTS FEED (100% Algorithmic Coverage + Loop Prevention) ---
+// --- 2. GET SHORTS FEED (100% Algorithmic Coverage + Vriendelijkere Tijd-Decay) ---
 shortsRoute.post("/feed", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (user && (await checkIfBanned(user.id, c))) {
@@ -171,12 +171,13 @@ shortsRoute.post("/feed", collectAuth, async (c) => {
 	const seenIds: string[] = Array.isArray(body.seenIds) ? body.seenIds : [];
 
 	try {
-		// Algorithm Math (Retention + Likes / Time Decay)
+		// Aangepast algoritme: Vriendelijkere tijd-decay op basis van dagen in plaats van agressieve uren
 		const ageInHours = sql`EXTRACT(EPOCH FROM (NOW() - ${shorts.createdAt})) / 3600`;
 		const apv = sql`LEAST(1.0, ${shorts.watchDuration}::float / GREATEST(${shorts.views} * GREATEST(${shorts.videoLength}, 1), 1))`;
 		const likeRate = sql`${shorts.likesCount}::float / GREATEST(${shorts.views}, 1)`;
+
 		const algoScore =
-			sql<number>`((70.0 * ${apv}) + (30.0 * ${likeRate})) / POWER(${ageInHours} + 1.0, 1.5)`.as(
+			sql<number>`((70.0 * ${apv}) + (30.0 * ${likeRate})) / POWER((${ageInHours} / 24.0) + 1.0, 1.2)`.as(
 				"algo_score"
 			);
 
@@ -222,7 +223,7 @@ shortsRoute.post("/feed", collectAuth, async (c) => {
 
 		let loopRestarted = false;
 
-		// Exhaustion Loop Fallback: Ensure 100% coverage before restarting loop
+		// Exhaustion Loop Fallback: Zorg voor 100% dekking voordat de loop opnieuw begint
 		if (feedShorts.length < limit && seenIds.length > 0) {
 			loopRestarted = true;
 			const remainingNeeded = limit - feedShorts.length;
