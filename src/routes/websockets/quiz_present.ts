@@ -287,6 +287,9 @@ presentWs.get(
 				const globalState = (globalThis as any)["__quiz_play_state__"];
 				const activeSession = globalState?.activeQuestionsBySession?.get(sessionId);
 				if (activeSession) {
+					const timePassed = Date.now() - activeSession.serverTime;
+					const remaining = Math.max(0, activeSession.durationMs - timePassed);
+
 					ws.send(
 						JSON.stringify({
 							type: "SYNC_STATE",
@@ -294,7 +297,8 @@ presentWs.get(
 							payload: activeSession.presenterPayload,
 							resultsBreakdown: activeSession.resultsBreakdown,
 							leaderboard: activeSession.leaderboard,
-							responseCount: activeSession.responses?.size || 0
+							responseCount: activeSession.responses?.size || 0,
+							durationMs: remaining
 						})
 					);
 				}
@@ -314,6 +318,28 @@ presentWs.get(
 									break;
 								}
 							}
+						}
+						return;
+					}
+
+					if (data.type === "REQUEST_SYNC") {
+						const globalState = (globalThis as any)["__quiz_play_state__"];
+						const activeSession = globalState?.activeQuestionsBySession?.get(sessionId);
+						if (activeSession) {
+							const timePassed = Date.now() - activeSession.serverTime;
+							const remaining = Math.max(0, activeSession.durationMs - timePassed);
+
+							ws.send(
+								JSON.stringify({
+									type: "SYNC_STATE",
+									phase: activeSession.phase,
+									payload: activeSession.presenterPayload,
+									resultsBreakdown: activeSession.resultsBreakdown,
+									leaderboard: activeSession.leaderboard,
+									responseCount: activeSession.responses?.size || 0,
+									durationMs: remaining
+								})
+							);
 						}
 						return;
 					}
@@ -374,7 +400,6 @@ presentWs.get(
 								.where(eq(questions.quizId, session.quizId))
 								.orderBy(questions.position);
 
-							// Direct to podium transition
 							if (activeSession.questionIndex + 1 >= quizQuestions.length) {
 								activeSession.phase = "finished";
 								const allPlayers = await database
@@ -499,19 +524,16 @@ async function triggerQuestionPhase(quizId: string, sessionId: string, questionI
 		.orderBy(quizOptions.position);
 	const slotColors = qOptions.map((o) => o.color);
 
-	// Fisher-Yates Shuffle
 	const shuffledOptions = [...qOptions];
 	for (let i = shuffledOptions.length - 1; i > 0; i--) {
 		const j = Math.floor(Math.random() * (i + 1));
 		[shuffledOptions[i], shuffledOptions[j]] = [shuffledOptions[j], shuffledOptions[i]];
 	}
-	// Re-assign colors to slots so UI option colors DO NOT move
 	shuffledOptions.forEach((opt, idx) => {
 		opt.color = slotColors[idx] ?? opt.color;
 	});
 
 	const presenterPayload = { question: targetQ, options: shuffledOptions };
-	// CRITICAL: Omit 'isCorrect' from player payload
 	const playerOptions = shuffledOptions.map((o) => ({
 		id: o.id,
 		text: o.text,
@@ -587,7 +609,6 @@ async function triggerQuestionPhase(quizId: string, sessionId: string, questionI
 				payload: playerPayload
 			});
 
-			// Set timeout for answering window expiration
 			setTimeout(() => {
 				const checkSession = globalPlayState.activeQuestionsBySession.get(sessionId);
 				if (
