@@ -152,7 +152,7 @@ shortsRoute.post("/", requireAuth, async (c) => {
 	}
 });
 
-// --- 2. GET SHORTS FEED (100% Algorithmic Coverage + Vriendelijkere Tijd-Decay) ---
+// --- 2. GET SHORTS FEED (100% Dekking + Algoritme + Recency Boost voor nieuwe video's) ---
 shortsRoute.post("/feed", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (user && (await checkIfBanned(user.id, c))) {
@@ -171,15 +171,16 @@ shortsRoute.post("/feed", collectAuth, async (c) => {
 	const seenIds: string[] = Array.isArray(body.seenIds) ? body.seenIds : [];
 
 	try {
-		// Aangepast algoritme: Vriendelijkere tijd-decay op basis van dagen in plaats van agressieve uren
 		const ageInHours = sql`EXTRACT(EPOCH FROM (NOW() - ${shorts.createdAt})) / 3600`;
 		const apv = sql`LEAST(1.0, ${shorts.watchDuration}::float / GREATEST(${shorts.views} * GREATEST(${shorts.videoLength}, 1), 1))`;
 		const likeRate = sql`${shorts.likesCount}::float / GREATEST(${shorts.views}, 1)`;
 
-		const algoScore =
-			sql<number>`((70.0 * ${apv}) + (30.0 * ${likeRate})) / POWER((${ageInHours} / 24.0) + 1.0, 1.2)`.as(
-				"algo_score"
-			);
+		// Recency Boost: Nieuwe video's krijgen een startbonus van ~10 punten die langzaam afneemt
+		const recencyBoost = sql`10.0 / POWER((${ageInHours} / 24.0) + 1.0, 0.5)`;
+		// Performance Score op basis van retentie en likes
+		const performanceScore = sql`((60.0 * ${apv}) + (30.0 * ${likeRate})) / POWER((${ageInHours} / 24.0) + 1.0, 1.2)`;
+
+		const algoScore = sql<number>`(${recencyBoost} + ${performanceScore})`.as("algo_score");
 
 		const conditions = [eq(shorts.isModerated, false)];
 		if (seenIds.length > 0) {
@@ -223,7 +224,7 @@ shortsRoute.post("/feed", collectAuth, async (c) => {
 
 		let loopRestarted = false;
 
-		// Exhaustion Loop Fallback: Zorg voor 100% dekking voordat de loop opnieuw begint
+		// Exhaustion Loop Fallback: 100% dekking garanderen voordat de loop opnieuw begint
 		if (feedShorts.length < limit && seenIds.length > 0) {
 			loopRestarted = true;
 			const remainingNeeded = limit - feedShorts.length;
