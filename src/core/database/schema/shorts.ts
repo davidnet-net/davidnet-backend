@@ -1,5 +1,5 @@
 import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
-import { boolean, integer, pgSchema, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, pgSchema, text, timestamp, uuid, primaryKey } from "drizzle-orm/pg-core";
 import { authSchema, users } from "./auth";
 
 // --- TABLES ---
@@ -28,6 +28,24 @@ export const shorts = authSchema.table("shorts", {
 	updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
 });
 
+export const shortLikes = authSchema.table(
+	"short_likes",
+	{
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.userId, { onDelete: "cascade" }),
+		shortId: uuid("short_id")
+			.notNull()
+			.references(() => shorts.id, { onDelete: "cascade" }),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
+	},
+	(t) => ({
+		pk: primaryKey({ columns: [t.userId, t.shortId] })
+	})
+);
+
 // --- TYPE EXPORTS ---
 export type Short = InferSelectModel<typeof shorts>;
 export type NewShort = InferInsertModel<typeof shorts>;
+export type ShortLike = InferSelectModel<typeof shortLikes>;
+export type NewShortLike = InferInsertModel<typeof shortLikes>;

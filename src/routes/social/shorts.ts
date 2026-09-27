@@ -10,6 +10,7 @@ import {
 	accountModerationStatus,
 	internalAccess,
 	shorts,
+	shortLikes,
 	users
 } from "../../core/database/schema/schema";
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
@@ -151,7 +152,7 @@ shortsRoute.post("/", requireAuth, async (c) => {
 	}
 });
 
-// --- 2. GET SHORTS FEED (80/20 Algorithmic + Loop Prevention) ---
+// --- 2. GET SHORTS FEED (100% Algorithmic Coverage + Loop Prevention) ---
 shortsRoute.post("/feed", collectAuth, async (c) => {
 	const user = c.get("user");
 	if (user && (await checkIfBanned(user.id, c))) {
@@ -169,9 +170,6 @@ shortsRoute.post("/feed", collectAuth, async (c) => {
 		typeof body.limit === "number" && body.limit > 0 && body.limit <= 50 ? body.limit : 15;
 	const seenIds: string[] = Array.isArray(body.seenIds) ? body.seenIds : [];
 
-	const algoLimit = Math.ceil(limit * 0.8);
-	const discoveryLimit = limit - algoLimit;
-
 	try {
 		// Algorithm Math (Retention + Likes / Time Decay)
 		const ageInHours = sql`EXTRACT(EPOCH FROM (NOW() - ${shorts.createdAt})) / 3600`;
@@ -182,15 +180,16 @@ shortsRoute.post("/feed", collectAuth, async (c) => {
 				"algo_score"
 			);
 
-		const algoConditions = [eq(shorts.isModerated, false)];
-		const discoveryConditions = [eq(shorts.isModerated, false), sql`${shorts.views} < 50`];
-
+		const conditions = [eq(shorts.isModerated, false)];
 		if (seenIds.length > 0) {
-			algoConditions.push(notInArray(shorts.id, seenIds));
-			discoveryConditions.push(notInArray(shorts.id, seenIds));
+			conditions.push(notInArray(shorts.id, seenIds));
 		}
 
-		const algoQuery = database
+		const likedExpression = user
+			? sql<boolean>`CASE WHEN ${shortLikes.userId} IS NOT NULL THEN TRUE ELSE FALSE END`
+			: sql<boolean>`FALSE`;
+
+		let query = database
 			.select({
 				id: shorts.id,
 				title: shorts.title,
@@ -203,59 +202,36 @@ shortsRoute.post("/feed", collectAuth, async (c) => {
 				watchDuration: shorts.watchDuration,
 				videoLength: shorts.videoLength,
 				createdAt: shorts.createdAt,
-				score: algoScore
+				score: algoScore,
+				liked: likedExpression
 			})
 			.from(shorts)
-			.innerJoin(users, eq(shorts.userId, users.userId))
-			.where(and(...algoConditions))
+			.innerJoin(users, eq(shorts.userId, users.userId));
+
+		if (user) {
+			query = query.leftJoin(
+				shortLikes,
+				and(eq(shortLikes.shortId, shorts.id), eq(shortLikes.userId, user.id))
+			) as any;
+		}
+
+		let feedShorts = await query
+			.where(and(...conditions))
 			.orderBy(desc(algoScore))
-			.limit(algoLimit);
+			.limit(limit);
 
-		const discoveryQuery = database
-			.select({
-				id: shorts.id,
-				title: shorts.title,
-				videoUrl: shorts.videoUrl,
-				creator: users.username,
-				creatorDisplayName: users.displayName,
-				creatorAvatarUrl: users.avatarUrl,
-				views: shorts.views,
-				likesCount: shorts.likesCount,
-				watchDuration: shorts.watchDuration,
-				videoLength: shorts.videoLength,
-				createdAt: shorts.createdAt,
-				score: sql<number>`0.0`.as("score")
-			})
-			.from(shorts)
-			.innerJoin(users, eq(shorts.userId, users.userId))
-			.where(and(...discoveryConditions))
-			.orderBy(desc(shorts.createdAt))
-			.limit(discoveryLimit);
-
-		let [algoShorts, discoveryShorts] = await Promise.all([algoQuery, discoveryQuery]);
-
-		let combinedFeed = [];
-		let aIndex = 0,
-			dIndex = 0;
-		while (aIndex < algoShorts.length || dIndex < discoveryShorts.length) {
-			for (let i = 0; i < 4 && aIndex < algoShorts.length; i++)
-				combinedFeed.push(algoShorts[aIndex++]);
-			if (dIndex < discoveryShorts.length) combinedFeed.push(discoveryShorts[dIndex++]);
-		}
-
-		let uniqueFeed = Array.from(new Map(combinedFeed.map((item) => [item.id, item])).values());
 		let loopRestarted = false;
 
-		// Exhaustion Loop Fallback
-		if (uniqueFeed.length < limit && seenIds.length > 0) {
+		// Exhaustion Loop Fallback: Ensure 100% coverage before restarting loop
+		if (feedShorts.length < limit && seenIds.length > 0) {
 			loopRestarted = true;
-			const remainingNeeded = limit - uniqueFeed.length;
-			const excludeIds = uniqueFeed.map((v) => v.id);
+			const remainingNeeded = limit - feedShorts.length;
+			const fetchedIds = feedShorts.map((v) => v.id);
+			const excludeIds = [...seenIds, ...fetchedIds];
 
-			const fallbackConditions = [eq(shorts.isModerated, false)];
-			if (excludeIds.length > 0) fallbackConditions.push(notInArray(shorts.id, excludeIds));
+			const fallbackConditions = [eq(shorts.isModerated, false), notInArray(shorts.id, excludeIds)];
 
-			const fallbackShorts = await database
+			let fallbackQuery = database
 				.select({
 					id: shorts.id,
 					title: shorts.title,
@@ -268,21 +244,31 @@ shortsRoute.post("/feed", collectAuth, async (c) => {
 					watchDuration: shorts.watchDuration,
 					videoLength: shorts.videoLength,
 					createdAt: shorts.createdAt,
-					score: algoScore
+					score: algoScore,
+					liked: likedExpression
 				})
 				.from(shorts)
-				.innerJoin(users, eq(shorts.userId, users.userId))
+				.innerJoin(users, eq(shorts.userId, users.userId));
+
+			if (user) {
+				fallbackQuery = fallbackQuery.leftJoin(
+					shortLikes,
+					and(eq(shortLikes.shortId, shorts.id), eq(shortLikes.userId, user.id))
+				) as any;
+			}
+
+			const fallbackShorts = await fallbackQuery
 				.where(and(...fallbackConditions))
 				.orderBy(desc(algoScore))
 				.limit(remainingNeeded);
 
-			uniqueFeed = [...uniqueFeed, ...fallbackShorts];
+			feedShorts = [...feedShorts, ...fallbackShorts];
 		}
 
 		return c.json({
 			success: true,
 			code: "SUCCESS",
-			shorts: uniqueFeed,
+			shorts: feedShorts,
 			loopRestarted
 		});
 	} catch (error) {
@@ -317,26 +303,61 @@ shortsRoute.post("/:id/watch", async (c) => {
 	}
 });
 
-// --- 4. TRACK METRICS: LIKES ---
-shortsRoute.post("/:id/like", collectAuth, async (c) => {
+// --- 4. TRACK METRICS: LIKES (Prevent Multiple Likes) ---
+shortsRoute.post("/:id/like", requireAuth, async (c) => {
+	const userId = c.get("user").id;
 	const shortId = c.req.param("id");
-	let body;
-	try {
-		body = await c.req.json();
-	} catch {
-		return c.json({ success: false }, 400);
-	}
-
-	const increment = body.liked ? 1 : -1;
 
 	try {
-		await database
-			.update(shorts)
-			.set({ likesCount: sql`GREATEST(${shorts.likesCount} + ${increment}, 0)` })
-			.where(eq(shorts.id, shortId));
-		return c.json({ success: true });
+		const [existingLike] = await database
+			.select()
+			.from(shortLikes)
+			.where(and(eq(shortLikes.userId, userId), eq(shortLikes.shortId, shortId)))
+			.limit(1);
+
+		let isLiked = false;
+		let updatedLikesCount = 0;
+
+		if (existingLike) {
+			// Unlike
+			await database.transaction(async (tx) => {
+				await tx
+					.delete(shortLikes)
+					.where(and(eq(shortLikes.userId, userId), eq(shortLikes.shortId, shortId)));
+
+				const [updated] = await tx
+					.update(shorts)
+					.set({ likesCount: sql`GREATEST(${shorts.likesCount} - 1, 0)` })
+					.where(eq(shorts.id, shortId))
+					.returning({ likesCount: shorts.likesCount });
+
+				updatedLikesCount = updated ? updated.likesCount : 0;
+			});
+			isLiked = false;
+		} else {
+			// Like
+			await database.transaction(async (tx) => {
+				await tx.insert(shortLikes).values({ userId, shortId });
+
+				const [updated] = await tx
+					.update(shorts)
+					.set({ likesCount: sql`${shorts.likesCount} + 1` })
+					.where(eq(shorts.id, shortId))
+					.returning({ likesCount: shorts.likesCount });
+
+				updatedLikesCount = updated ? updated.likesCount : 0;
+			});
+			isLiked = true;
+		}
+
+		return c.json({
+			success: true,
+			liked: isLiked,
+			likesCount: updatedLikesCount
+		});
 	} catch (error) {
-		return c.json({ success: false }, 500);
+		console.error("Failed to toggle like:", error);
+		return c.json({ success: false, code: "LIKE_FAILED" }, 500);
 	}
 });
 
@@ -355,7 +376,11 @@ shortsRoute.get("/:id", collectAuth, async (c) => {
 			? eq(shorts.id, id)
 			: and(eq(shorts.id, id), eq(shorts.isModerated, false));
 
-		const result = await database
+		const likedExpression = user
+			? sql<boolean>`CASE WHEN ${shortLikes.userId} IS NOT NULL THEN TRUE ELSE FALSE END`
+			: sql<boolean>`FALSE`;
+
+		let query = database
 			.select({
 				id: shorts.id,
 				title: shorts.title,
@@ -368,12 +393,20 @@ shortsRoute.get("/:id", collectAuth, async (c) => {
 				watchDuration: shorts.watchDuration,
 				videoLength: shorts.videoLength,
 				isModerated: shorts.isModerated,
-				createdAt: shorts.createdAt
+				createdAt: shorts.createdAt,
+				liked: likedExpression
 			})
 			.from(shorts)
-			.innerJoin(users, eq(shorts.userId, users.userId))
-			.where(conditions)
-			.limit(1);
+			.innerJoin(users, eq(shorts.userId, users.userId));
+
+		if (user) {
+			query = query.leftJoin(
+				shortLikes,
+				and(eq(shortLikes.shortId, shorts.id), eq(shortLikes.userId, user.id))
+			) as any;
+		}
+
+		const result = await query.where(conditions).limit(1);
 
 		if (!result[0]) return c.json({ success: false, code: "SHORT_NOT_FOUND" }, 404);
 
