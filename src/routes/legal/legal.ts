@@ -24,7 +24,7 @@ const LEGAL_FILES = [
 	"sub_processors",
 	"terms_of_service"
 ];
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 uur
+const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 24 uur ts nu 6 uur
 
 /**
  * Hulpfunctie om de GitHub repo te synchroniseren als de cache verlopen is (>24u).
