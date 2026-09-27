@@ -10,7 +10,7 @@ import {
 	sessionParticipants,
 	type QuizSession
 } from "../../core/database/schema/quiz";
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, desc } from "drizzle-orm";
 import { hasPermission } from "../../core/shared/checkPermissions";
 import { verify } from "hono/jwt";
 import { getCookie } from "hono/cookie";
@@ -36,36 +36,30 @@ const HOST_HEARTBEAT_TICK_MS = 5000;
 const HOST_DEAD_MISSED_TICKS = 12;
 
 const GLOBAL_HOST_INTERVAL_KEY = "__quiz_host_heartbeat_interval__";
-if ((globalThis as any)[GLOBAL_HOST_INTERVAL_KEY]) {
+if ((globalThis as any)[GLOBAL_HOST_INTERVAL_KEY])
 	clearInterval((globalThis as any)[GLOBAL_HOST_INTERVAL_KEY]);
-}
 
 (globalThis as any)[GLOBAL_HOST_INTERVAL_KEY] = setInterval(() => {
 	activePresenters.forEach((presenters, sessionId) => {
 		const deadConns = new Set<PresenterConnection>();
-
 		for (const conn of presenters) {
 			if (!conn.ws || conn.ws.readyState !== 1) {
 				deadConns.add(conn);
 				continue;
 			}
-
 			conn.missedPongs++;
-
 			if (conn.missedPongs >= HOST_DEAD_MISSED_TICKS) {
 				deadConns.add(conn);
 			} else {
 				conn.ws.send(JSON.stringify({ type: "PING" }));
 			}
 		}
-
 		for (const conn of deadConns) {
 			try {
 				conn.ws.close(4008, "Host Heartbeat Timeout");
 			} catch {}
 			presenters.delete(conn);
 		}
-
 		if (presenters.size === 0 && !hostDisconnectGracePeriods.has(sessionId)) {
 			const timeout = setTimeout(() => {
 				hostDisconnectGracePeriods.delete(sessionId);
@@ -89,22 +83,15 @@ export function broadcastToPresenters(sessionId: string, message: any) {
 	}
 }
 
-export const presentWs = new Hono<{
-	Variables: {
-		session: QuizSession;
-		quizName: string;
-	};
-}>();
+export const presentWs = new Hono<{ Variables: { session: QuizSession; quizName: string } }>();
 
 async function checkAuth(token: string | undefined) {
 	if (!token) return false;
 	const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET;
 	if (!ACCESS_SECRET) throw new Error("JWT_ACCESS_SECRET is not configured");
-
 	try {
 		const payload = await verify(token, ACCESS_SECRET, "HS256");
 		if (payload.type && payload.type !== "access") return false;
-
 		const userID = payload.userID as string;
 		if (!userID) return false;
 		return { userID };
@@ -130,9 +117,7 @@ async function generateUniquePin(): Promise<string> {
 
 function isQuestionInvalid(q: any, options: any[]): boolean {
 	const SUPPORTED_TYPES = ["quiz", "true_false"];
-
 	if (!q.type || !SUPPORTED_TYPES.includes(q.type)) return true;
-
 	const questionText = q.text?.trim() || "";
 	if (!questionText || questionText.length > 250) return true;
 
@@ -142,20 +127,13 @@ function isQuestionInvalid(q: any, options: any[]): boolean {
 	}
 
 	if (q.type === "quiz") {
-		const filledOptions = options.filter((opt) => {
-			const text = opt.text?.trim() || "";
-			return text.length > 0;
-		});
-
+		const filledOptions = options.filter((opt) => (opt.text?.trim() || "").length > 0);
 		if (filledOptions.length < 2) return true;
 		if (filledOptions.some((opt) => opt.text.trim().length > 100)) return true;
-
 		const correctCount = filledOptions.filter((opt) => opt.isCorrect).length;
-
 		if (!q.isMultiSelect && correctCount !== 1) return true;
 		if (q.isMultiSelect && correctCount < 2) return true;
 	}
-
 	return false;
 }
 
@@ -179,7 +157,6 @@ presentWs.get(
 			.from(quizzes)
 			.where(eq(quizzes.id, quizId))
 			.limit(1);
-
 		if (!quiz) return c.text("Quiz not found", 404);
 
 		let hasAccess = false;
@@ -194,28 +171,21 @@ presentWs.get(
 				)
 			)
 			.limit(1);
-
 		if (collaborator) hasAccess = true;
-
-		if (!hasAccess) {
+		if (!hasAccess)
 			hasAccess = await hasPermission({
 				userId: authResult.userID,
 				workspaceId: quiz.workspaceId,
 				teamId: quiz.teamId ?? undefined,
 				permissionKey: "quiz:present"
 			});
-		}
-
 		if (!hasAccess) return c.json({ code: "NO_PERMS" }, 403);
 
 		const quizQuestions = await database
 			.select()
 			.from(questions)
 			.where(eq(questions.quizId, quizId));
-
-		if (quizQuestions.length === 0) {
-			return c.json({ code: "NO_QUESTIONS" }, 400);
-		}
+		if (quizQuestions.length === 0) return c.json({ code: "NO_QUESTIONS" }, 400);
 
 		const quizOpts = await database
 			.select()
@@ -226,24 +196,18 @@ presentWs.get(
 					quizQuestions.map((q) => q.id)
 				)
 			);
-
 		const optionsByQuestion = new Map<string, any[]>();
 		quizOpts.forEach((opt) => {
-			if (!optionsByQuestion.has(opt.questionId)) {
-				optionsByQuestion.set(opt.questionId, []);
-			}
+			if (!optionsByQuestion.has(opt.questionId)) optionsByQuestion.set(opt.questionId, []);
 			optionsByQuestion.get(opt.questionId)!.push(opt);
 		});
 
 		for (const q of quizQuestions) {
 			const opts = optionsByQuestion.get(q.id) || [];
-			if (isQuestionInvalid(q, opts)) {
-				return c.json({ code: `QUESTION_INVALID` }, 400);
-			}
+			if (isQuestionInvalid(q, opts)) return c.json({ code: `QUESTION_INVALID` }, 400);
 		}
 
 		let session: QuizSession | undefined;
-
 		if (reqSessionId) {
 			const [existingById] = await database
 				.select()
@@ -252,7 +216,6 @@ presentWs.get(
 				.limit(1);
 			if (existingById) session = existingById;
 		}
-
 		if (!session) {
 			const [existingLobby] = await database
 				.select()
@@ -261,27 +224,20 @@ presentWs.get(
 				.limit(1);
 			if (existingLobby) session = existingLobby;
 		}
-
 		if (!session) {
 			const pinCode = await generateUniquePin();
 			const [newSession] = await database
 				.insert(quizSessions)
-				.values({
-					quizId,
-					pinCode,
-					status: "lobby",
-					locked: false
-				})
+				.values({ quizId, pinCode, status: "lobby", locked: false })
 				.returning();
 			session = newSession;
 		}
 
-		if (c.req.header("upgrade")?.toLowerCase() !== "websocket") {
+		if (c.req.header("upgrade")?.toLowerCase() !== "websocket")
 			return c.json(
 				{ success: true, sessionId: session.id, pinCode: session.pinCode, quizName: quiz.name },
 				200
 			);
-		}
 
 		c.set("session", session);
 		c.set("quizName", quiz.name);
@@ -291,24 +247,13 @@ presentWs.get(
 		const session = c.get("session");
 		const quizName = c.get("quizName");
 		const sessionId = session.id;
-
 		let connectionId = crypto.randomUUID();
 
 		return {
 			async onOpen(event, ws) {
-				if (!activePresenters.has(sessionId)) {
-					activePresenters.set(sessionId, new Set());
-				}
-
-				const presenterConn: PresenterConnection = {
-					ws,
-					sessionId,
-					missedPongs: 0,
-					connectionId
-				};
-
+				if (!activePresenters.has(sessionId)) activePresenters.set(sessionId, new Set());
+				const presenterConn: PresenterConnection = { ws, sessionId, missedPongs: 0, connectionId };
 				activePresenters.get(sessionId)!.add(presenterConn);
-
 				if (hostDisconnectGracePeriods.has(sessionId)) {
 					clearTimeout(hostDisconnectGracePeriods.get(sessionId)!);
 					hostDisconnectGracePeriods.delete(sessionId);
@@ -318,7 +263,6 @@ presentWs.get(
 					.select()
 					.from(sessionParticipants)
 					.where(eq(sessionParticipants.sessionId, sessionId));
-
 				ws.send(
 					JSON.stringify({
 						type: "SESSION_INFO",
@@ -330,16 +274,30 @@ presentWs.get(
 							connectionId,
 							players: currentParticipants.map((p) => {
 								const playerConn = wsByParticipant.get(p.id);
-								const missed = playerConn?.missedPongs || 0;
 								return {
 									id: p.id,
 									nickname: p.nickname,
-									failingHeartbeat: missed >= 3
+									failingHeartbeat: (playerConn?.missedPongs || 0) >= 3
 								};
 							})
 						}
 					})
 				);
+
+				const globalState = (globalThis as any)["__quiz_play_state__"];
+				const activeSession = globalState?.activeQuestionsBySession?.get(sessionId);
+				if (activeSession) {
+					ws.send(
+						JSON.stringify({
+							type: "SYNC_STATE",
+							phase: activeSession.phase,
+							payload: activeSession.presenterPayload,
+							resultsBreakdown: activeSession.resultsBreakdown,
+							leaderboard: activeSession.leaderboard,
+							responseCount: activeSession.responses?.size || 0
+						})
+					);
+				}
 			},
 
 			async onMessage(event, ws) {
@@ -365,111 +323,96 @@ presentWs.get(
 							.update(quizSessions)
 							.set({ status: "question_active", currentQuestionIndex: 0 })
 							.where(eq(quizSessions.id, sessionId));
+						await triggerQuestionPhase(session.quizId, sessionId, 0);
+						return;
+					}
 
-						const quizQuestions = await database
-							.select()
-							.from(questions)
-							.where(eq(questions.quizId, session.quizId))
-							.orderBy(questions.position);
+					if (data.type === "NEXT_PHASE") {
+						const globalState = (globalThis as any)["__quiz_play_state__"];
+						const activeSession = globalState?.activeQuestionsBySession?.get(sessionId);
+						if (!activeSession) return;
 
-						const firstQ = quizQuestions[0];
-						if (!firstQ) return;
-
-						const qOptions = await database
-							.select()
-							.from(quizOptions)
-							.where(eq(quizOptions.questionId, firstQ.id))
-							.orderBy(quizOptions.position);
-
-						// Save standard UI slot colors before shuffling options
-						const slotColors = qOptions.map((o) => o.color);
-
-						// Fisher-Yates Shuffle
-						const shuffledOptions = [...qOptions];
-						for (let i = shuffledOptions.length - 1; i > 0; i--) {
-							const j = Math.floor(Math.random() * (i + 1));
-							[shuffledOptions[i], shuffledOptions[j]] = [shuffledOptions[j], shuffledOptions[i]];
-						}
-
-						// Re-assign colors to slots so UI option colors DO NOT move
-						shuffledOptions.forEach((opt, idx) => {
-							opt.color = slotColors[idx] ?? opt.color;
-						});
-
-						const presenterPayload = { question: firstQ, options: shuffledOptions };
-						const playerOptions = shuffledOptions.map((o) => ({
-							id: o.id,
-							text: o.text,
-							color: o.color,
-							position: o.position
-						}));
-
-						const playerPayload = {
-							question: {
-								id: firstQ.id,
-								text: firstQ.text,
-								type: firstQ.type,
-								timeLimit: firstQ.timeLimit,
-								isMultiSelect: firstQ.isMultiSelect
-							},
-							options: playerOptions
-						};
-
-						const previewDurationMs = 5000;
-						const previewServerTime = Date.now();
-
-						const globalPlayState = (globalThis as any)["__quiz_play_state__"];
-						if (globalPlayState?.activeQuestionsBySession) {
-							globalPlayState.activeQuestionsBySession.set(sessionId, {
-								type: "QUESTION_PREVIEW",
-								serverTime: previewServerTime,
-								durationMs: previewDurationMs,
-								payload: playerPayload
-							});
-						}
-
-						broadcastToPresenters(sessionId, {
-							type: "QUESTION_PREVIEW",
-							serverTime: previewServerTime,
-							durationMs: previewDurationMs,
-							payload: presenterPayload
-						});
-
-						broadcastToSessionPlayers(sessionId, {
-							type: "QUESTION_PREVIEW",
-							serverTime: previewServerTime,
-							durationMs: previewDurationMs,
-							payload: playerPayload
-						});
-
-						setTimeout(() => {
-							const activeServerTime = Date.now();
-							const activeDurationMs = firstQ.timeLimit * 1000;
-
-							if (globalPlayState?.activeQuestionsBySession) {
-								globalPlayState.activeQuestionsBySession.set(sessionId, {
-									type: "QUESTION_ACTIVE",
-									serverTime: activeServerTime,
-									durationMs: activeDurationMs,
-									payload: playerPayload
+						if (activeSession.phase === "active") {
+							activeSession.phase = "results";
+							const breakdown: Record<string, number> = {};
+							activeSession.responses.forEach((res: any) => {
+								res.selectedOptionIds.forEach((id: string) => {
+									breakdown[id] = (breakdown[id] || 0) + 1;
 								});
-							}
+							});
+							activeSession.resultsBreakdown = breakdown;
 
 							broadcastToPresenters(sessionId, {
-								type: "QUESTION_ACTIVE",
-								serverTime: activeServerTime,
-								durationMs: activeDurationMs,
-								payload: presenterPayload
+								type: "RESULTS",
+								breakdown,
+								payload: activeSession.presenterPayload
 							});
 
-							broadcastToSessionPlayers(sessionId, {
-								type: "QUESTION_ACTIVE",
-								serverTime: activeServerTime,
-								durationMs: activeDurationMs,
-								payload: playerPayload
-							});
-						}, previewDurationMs);
+							const correctOptionIds = activeSession.presenterPayload.options
+								.filter((o: any) => o.isCorrect)
+								.map((o: any) => o.id);
 
+							wsByParticipant.forEach((conn: any, pId: string) => {
+								if (conn.sessionId === sessionId && conn.ws.readyState === 1) {
+									const pResponse = activeSession.responses.get(pId);
+									conn.ws.send(
+										JSON.stringify({
+											type: "RESULTS",
+											payload: {
+												correct: pResponse?.isCorrect || false,
+												pointsEarned: pResponse?.pointsEarned || 0,
+												correctOptions: correctOptionIds
+											}
+										})
+									);
+								}
+							});
+						} else if (activeSession.phase === "results") {
+							const quizQuestions = await database
+								.select()
+								.from(questions)
+								.where(eq(questions.quizId, session.quizId))
+								.orderBy(questions.position);
+
+							// Direct to podium transition
+							if (activeSession.questionIndex + 1 >= quizQuestions.length) {
+								activeSession.phase = "finished";
+								const allPlayers = await database
+									.select({
+										id: sessionParticipants.id,
+										nickname: sessionParticipants.nickname,
+										score: sessionParticipants.score
+									})
+									.from(sessionParticipants)
+									.where(eq(sessionParticipants.sessionId, sessionId))
+									.orderBy(desc(sessionParticipants.score));
+								activeSession.leaderboard = allPlayers;
+								broadcastToPresenters(sessionId, { type: "FINISHED", payload: allPlayers });
+								broadcastToSessionPlayers(sessionId, { type: "FINISHED", payload: allPlayers });
+							} else {
+								activeSession.phase = "leaderboard";
+								const topPlayers = await database
+									.select({
+										id: sessionParticipants.id,
+										nickname: sessionParticipants.nickname,
+										score: sessionParticipants.score
+									})
+									.from(sessionParticipants)
+									.where(eq(sessionParticipants.sessionId, sessionId))
+									.orderBy(desc(sessionParticipants.score))
+									.limit(5);
+								activeSession.leaderboard = topPlayers;
+
+								broadcastToPresenters(sessionId, { type: "LEADERBOARD", payload: topPlayers });
+								broadcastToSessionPlayers(sessionId, { type: "LEADERBOARD", payload: topPlayers });
+							}
+						} else if (activeSession.phase === "leaderboard") {
+							await triggerQuestionPhase(
+								session.quizId,
+								sessionId,
+								activeSession.questionIndex + 1
+							);
+						}
 						return;
 					}
 
@@ -482,12 +425,10 @@ presentWs.get(
 
 					if (data.type === "LOCK_SESSION" || data.type === "UNLOCK_SESSION") {
 						const isLocked = data.type === "LOCK_SESSION";
-
 						await database
 							.update(quizSessions)
 							.set({ locked: isLocked })
 							.where(eq(quizSessions.id, sessionId));
-
 						broadcastToPresenters(sessionId, {
 							type: "SESSION_INFO",
 							payload: {
@@ -505,10 +446,7 @@ presentWs.get(
 								.from(sessionParticipants)
 								.where(eq(sessionParticipants.id, playerId))
 								.limit(1);
-
-							if (participant) {
-								await kickParticipant(playerId, sessionId, participant.nickname);
-							}
+							if (participant) await kickParticipant(playerId, sessionId, participant.nickname);
 						}
 					}
 				} catch (error) {
@@ -522,7 +460,6 @@ presentWs.get(
 					for (const conn of presenters) {
 						if (conn.connectionId === connectionId) {
 							presenters.delete(conn);
-
 							if (presenters.size === 0 && !hostDisconnectGracePeriods.has(sessionId)) {
 								const timeout = setTimeout(() => {
 									hostDisconnectGracePeriods.delete(sessionId);
@@ -545,3 +482,155 @@ presentWs.get(
 		};
 	})
 );
+
+async function triggerQuestionPhase(quizId: string, sessionId: string, questionIndex: number) {
+	const quizQuestions = await database
+		.select()
+		.from(questions)
+		.where(eq(questions.quizId, quizId))
+		.orderBy(questions.position);
+	const targetQ = quizQuestions[questionIndex];
+	if (!targetQ) return;
+
+	const qOptions = await database
+		.select()
+		.from(quizOptions)
+		.where(eq(quizOptions.questionId, targetQ.id))
+		.orderBy(quizOptions.position);
+	const slotColors = qOptions.map((o) => o.color);
+
+	// Fisher-Yates Shuffle
+	const shuffledOptions = [...qOptions];
+	for (let i = shuffledOptions.length - 1; i > 0; i--) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[shuffledOptions[i], shuffledOptions[j]] = [shuffledOptions[j], shuffledOptions[i]];
+	}
+	// Re-assign colors to slots so UI option colors DO NOT move
+	shuffledOptions.forEach((opt, idx) => {
+		opt.color = slotColors[idx] ?? opt.color;
+	});
+
+	const presenterPayload = { question: targetQ, options: shuffledOptions };
+	// CRITICAL: Omit 'isCorrect' from player payload
+	const playerOptions = shuffledOptions.map((o) => ({
+		id: o.id,
+		text: o.text,
+		color: o.color,
+		position: o.position
+	}));
+
+	const playerPayload = {
+		question: {
+			id: targetQ.id,
+			text: targetQ.text,
+			type: targetQ.type,
+			timeLimit: targetQ.timeLimit,
+			isMultiSelect: targetQ.isMultiSelect,
+			pointsMultiplier: targetQ.pointsMultiplier
+		},
+		options: playerOptions
+	};
+
+	const previewDurationMs = 5000;
+	const previewServerTime = Date.now();
+	const globalPlayState = (globalThis as any)["__quiz_play_state__"];
+
+	globalPlayState.activeQuestionsBySession.set(sessionId, {
+		phase: "preview",
+		questionIndex,
+		serverTime: previewServerTime,
+		durationMs: previewDurationMs,
+		presenterPayload,
+		playerPayload,
+		responses: new Map<string, any>(),
+		resultsBreakdown: {},
+		leaderboard: []
+	});
+
+	broadcastToPresenters(sessionId, {
+		type: "QUESTION_PREVIEW",
+		serverTime: previewServerTime,
+		durationMs: previewDurationMs,
+		payload: presenterPayload
+	});
+	broadcastToSessionPlayers(sessionId, {
+		type: "QUESTION_PREVIEW",
+		serverTime: previewServerTime,
+		durationMs: previewDurationMs,
+		payload: playerPayload
+	});
+
+	setTimeout(() => {
+		const activeSession = globalPlayState.activeQuestionsBySession.get(sessionId);
+		if (
+			activeSession &&
+			activeSession.phase === "preview" &&
+			activeSession.questionIndex === questionIndex
+		) {
+			const activeServerTime = Date.now();
+			const activeDurationMs = targetQ.timeLimit * 1000;
+
+			activeSession.phase = "active";
+			activeSession.serverTime = activeServerTime;
+			activeSession.durationMs = activeDurationMs;
+
+			broadcastToPresenters(sessionId, {
+				type: "QUESTION_ACTIVE",
+				serverTime: activeServerTime,
+				durationMs: activeDurationMs,
+				payload: presenterPayload
+			});
+			broadcastToSessionPlayers(sessionId, {
+				type: "QUESTION_ACTIVE",
+				serverTime: activeServerTime,
+				durationMs: activeDurationMs,
+				payload: playerPayload
+			});
+
+			// Set timeout for answering window expiration
+			setTimeout(() => {
+				const checkSession = globalPlayState.activeQuestionsBySession.get(sessionId);
+				if (
+					checkSession &&
+					checkSession.phase === "active" &&
+					checkSession.questionIndex === questionIndex
+				) {
+					checkSession.phase = "results";
+					const breakdown: Record<string, number> = {};
+					checkSession.responses.forEach((res: any) => {
+						res.selectedOptionIds.forEach((id: string) => {
+							breakdown[id] = (breakdown[id] || 0) + 1;
+						});
+					});
+					checkSession.resultsBreakdown = breakdown;
+
+					broadcastToPresenters(sessionId, {
+						type: "RESULTS",
+						breakdown,
+						payload: checkSession.presenterPayload
+					});
+
+					const correctOptionIds = checkSession.presenterPayload.options
+						.filter((o: any) => o.isCorrect)
+						.map((o: any) => o.id);
+
+					wsByParticipant.forEach((conn: any, pId: string) => {
+						if (conn.sessionId === sessionId && conn.ws.readyState === 1) {
+							const pResponse = checkSession.responses.get(pId);
+							conn.ws.send(
+								JSON.stringify({
+									type: "RESULTS",
+									payload: {
+										correct: pResponse?.isCorrect || false,
+										pointsEarned: pResponse?.pointsEarned || 0,
+										correctOptions: correctOptionIds
+									}
+								})
+							);
+						}
+					});
+				}
+			}, activeDurationMs);
+		}
+	}, previewDurationMs);
+}
