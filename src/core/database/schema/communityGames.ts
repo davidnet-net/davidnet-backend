@@ -1,5 +1,5 @@
 import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
-import { boolean, integer, jsonb, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { bigint, boolean, integer, jsonb, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 import { authSchema, users } from "./auth";
 
@@ -83,6 +83,27 @@ export const communityGameSaves = authSchema.table(
 	(table) => [primaryKey({ columns: [table.gameId, table.userId] })]
 );
 
+// Per-session anti-cheat secret for a community game play session. Issued once when the game's
+// iframe loads; kept only in that iframe's JS closure (never exposed on window.DavidnetSDK). Score
+// submissions are HMAC-signed with this secret so they can't be forged by scripting postMessage
+// calls from outside the iframe (e.g. the parent page's own devtools console).
+export const communityGameSessions = authSchema.table("community_game_sessions", {
+	id: uuid("id")
+		.primaryKey()
+		.default(sql`uuidv7()`),
+	gameId: uuid("game_id")
+		.notNull()
+		.references(() => communityGame.id, { onDelete: "cascade" }),
+	userId: uuid("user_id")
+		.notNull()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	secret: text("secret").notNull(),
+	// Timestamp (ms) of the last accepted signed request, to reject replayed signatures.
+	lastSignedTimestamp: bigint("last_signed_timestamp", { mode: "number" }).default(0).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
+});
+
 // Audit trail of creator/moderator actions performed on a player's save or highscore data.
 export const communityGameAuditLog = authSchema.table("community_game_audit_log", {
 	id: uuid("id")
@@ -116,3 +137,6 @@ export type NewCommunityGameSave = InferInsertModel<typeof communityGameSaves>;
 
 export type CommunityGameAuditLog = InferSelectModel<typeof communityGameAuditLog>;
 export type NewCommunityGameAuditLog = InferInsertModel<typeof communityGameAuditLog>;
+
+export type CommunityGameSession = InferSelectModel<typeof communityGameSessions>;
+export type NewCommunityGameSession = InferInsertModel<typeof communityGameSessions>;

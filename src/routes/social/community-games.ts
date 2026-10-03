@@ -1,4 +1,5 @@
 import AdmZip from "adm-zip";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { and, desc, eq, inArray,sql } from "drizzle-orm";
 import { Hono } from "hono";
 
@@ -10,6 +11,7 @@ import {
 	communityGameHighscores,
 	communityGameLikes,
 	communityGameSaves,
+	communityGameSessions,
 	internalAccess,
 	users
 } from "../../core/database/schema/schema";
@@ -21,6 +23,11 @@ export const communityGamesRoute = new Hono<Env>();
 // Max size (in characters of the JSON string) allowed for a single save blob.
 const MAX_SAVE_JSON_LENGTH = 200_000;
 const MAX_HIGHSCORE_VALUE = 1_000_000_000_000;
+
+// --- ANTI-CHEAT: per-session signed highscore submissions ---
+const SESSION_DURATION_MS = 6 * 60 * 60 * 1000; // 6 hours
+const SESSION_TIMESTAMP_SKEW_MS = 2 * 60 * 1000; // 2 minutes
+const HEX_PATTERN = /^[0-9a-f]+$/i;
 
 // --- HELPER: CHECK IF USER IS BANNED ---
 async function checkIfBanned(userId: string, c: any): Promise<boolean> {
@@ -101,6 +108,71 @@ async function logGameAudit(entry: {
 	} catch (error) {
 		console.error("Failed to write community game audit log entry:", error);
 	}
+}
+
+// --- HELPER: VERIFY A SIGNED, SESSION-BOUND SCORE SUBMISSION ---
+// The session secret only ever lives inside the injected game-SDK script's closure (see the
+// upload route below), so a request can only be correctly signed by code actually running inside
+// that specific iframe's session - not by a script crafting postMessage calls from the parent
+// page's own console using the secret-less global `window.DavidnetSDK`.
+async function verifyGameSession(params: {
+	sessionId: string;
+	gameId: string;
+	userId: string;
+	score: number;
+	timestamp: number;
+	signature: string;
+}): Promise<{ valid: true } | { valid: false; code: string }> {
+	const { sessionId, gameId, userId, score, timestamp, signature } = params;
+
+	if (!HEX_PATTERN.test(signature) || signature.length % 2 !== 0) {
+		return { valid: false, code: "INVALID_SIGNATURE" };
+	}
+
+	const [session] = await database
+		.select()
+		.from(communityGameSessions)
+		.where(eq(communityGameSessions.id, sessionId))
+		.limit(1);
+
+	if (!session || session.gameId !== gameId || session.userId !== userId) {
+		return { valid: false, code: "INVALID_SESSION" };
+	}
+
+	if (session.expiresAt.getTime() < Date.now()) {
+		return { valid: false, code: "SESSION_EXPIRED" };
+	}
+
+	if (Math.abs(Date.now() - timestamp) > SESSION_TIMESTAMP_SKEW_MS) {
+		return { valid: false, code: "TIMESTAMP_OUT_OF_RANGE" };
+	}
+
+	// Timestamps must strictly increase per session so a previously-valid signed request can't be
+	// captured and replayed later to re-apply (or re-flag) the same score.
+	if (timestamp <= session.lastSignedTimestamp) {
+		return { valid: false, code: "REPLAYED_REQUEST" };
+	}
+
+	const expectedSignature = createHmac("sha256", session.secret)
+		.update(`${sessionId}:${gameId}:${score}:${timestamp}`)
+		.digest("hex");
+
+	const signatureBuffer = Buffer.from(signature, "hex");
+	const expectedBuffer = Buffer.from(expectedSignature, "hex");
+
+	if (
+		signatureBuffer.length !== expectedBuffer.length ||
+		!timingSafeEqual(signatureBuffer, expectedBuffer)
+	) {
+		return { valid: false, code: "INVALID_SIGNATURE" };
+	}
+
+	await database
+		.update(communityGameSessions)
+		.set({ lastSignedTimestamp: timestamp })
+		.where(eq(communityGameSessions.id, sessionId));
+
+	return { valid: true };
 }
 
 // --- 1. UPLOAD COMMUNITY GAME ---
@@ -200,11 +272,18 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 				// SDK bridge: exposes window.DavidnetSDK.{applyHighscore,getHighscores,saveJsonBlob,getJsonBlob}
 				// by round-tripping postMessage calls through the parent player page, which holds the
 				// authenticated session the sandboxed iframe can never access directly.
+				//
+				// Anti-cheat: a per-session secret is fetched once from the server via "startSession" and
+				// kept only in this closure (never attached to window.DavidnetSDK). applyHighscore signs
+				// every submission with it (HMAC-SHA256), so a score can only be forged by code that runs
+				// inside this exact iframe session - not by postMessage calls crafted from the parent page's
+				// own devtools console using the secret-less global SDK object.
 				const gameSdkScript = `
                 <script>
                     (function() {
                         try {
                             var DN_SOURCE = "davidnet-game-sdk";
+                            var GAME_ID = "${gameId}";
                             var pending = {};
 
                             function uid() {
@@ -244,11 +323,44 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
                                 handler(message);
                             });
 
+                            function hexFromBuffer(buffer) {
+                                var bytes = new Uint8Array(buffer);
+                                var hex = "";
+                                for (var i = 0; i < bytes.length; i++) {
+                                    hex += bytes[i].toString(16).padStart(2, "0");
+                                }
+                                return hex;
+                            }
+
+                            function signMessage(secret, message) {
+                                var enc = new TextEncoder();
+                                return crypto.subtle
+                                    .importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+                                    .then(function(key) {
+                                        return crypto.subtle.sign("HMAC", key, enc.encode(message));
+                                    })
+                                    .then(hexFromBuffer);
+                            }
+
+                            // Fetched once per page load; the secret never leaves this closure.
+                            var sessionReady = call("startSession", {});
+
                             window.DavidnetSDK = {
                                 // Submit a score. Server keeps the best score per-player and globally.
                                 // Resolves: { score, playerHighscore, globalHighscore, isNewPersonalBest, isNewGlobalBest }
                                 applyHighscore: function(score) {
-                                    return call("applyHighscore", { score: score });
+                                    return sessionReady.then(function(session) {
+                                        var timestamp = Date.now();
+                                        var message = session.sessionId + ":" + GAME_ID + ":" + score + ":" + timestamp;
+                                        return signMessage(session.secret, message).then(function(signature) {
+                                            return call("applyHighscore", {
+                                                score: score,
+                                                sessionId: session.sessionId,
+                                                timestamp: timestamp,
+                                                signature: signature
+                                            });
+                                        });
+                                    });
                                 },
                                 // Resolves: { playerHighscore, globalHighscore, leaderboard: [{ rank, username, displayName, avatarUrl, score }] (top 10) }
                                 getHighscores: function() {
@@ -580,6 +692,47 @@ communityGamesRoute.get("/:id/files", requireAuth, async (c) => {
 	}
 });
 
+// --- 8B. START A SIGNED GAME SESSION (anti-cheat) ---
+// Called once by the injected game-SDK script when the iframe loads. The returned secret is kept
+// only inside that script's closure and is required to sign any later /:id/highscore submission.
+communityGamesRoute.post("/:id/session/start", requireAuth, async (c) => {
+	const user = c.get("user");
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+
+	try {
+		const [game] = await database
+			.select({ id: communityGame.id })
+			.from(communityGame)
+			.where(eq(communityGame.id, gameId))
+			.limit(1);
+
+		if (!game) return c.json({ success: false, code: "GAME_NOT_FOUND" }, 404);
+
+		const secret = randomBytes(32).toString("hex");
+		const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
+
+		const [session] = await database
+			.insert(communityGameSessions)
+			.values({ gameId, userId: user.id, secret, expiresAt })
+			.returning({ id: communityGameSessions.id, expiresAt: communityGameSessions.expiresAt });
+
+		return c.json({
+			success: true,
+			code: "SESSION_STARTED",
+			sessionId: session.id,
+			secret,
+			expiresAt: session.expiresAt
+		});
+	} catch (error) {
+		console.error("Failed to start game session:", error);
+		return c.json({ success: false, code: "SESSION_START_FAILED" }, 500);
+	}
+});
+
 // --- 9. APPLY HIGHSCORE ---
 communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 	const user = c.get("user");
@@ -603,6 +756,31 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 		score > MAX_HIGHSCORE_VALUE
 	) {
 		return c.json({ success: false, code: "INVALID_SCORE" }, 400);
+	}
+
+	const sessionId = body.sessionId;
+	const timestamp = Number(body.timestamp);
+	const signature = body.signature;
+
+	if (
+		typeof sessionId !== "string" ||
+		!Number.isFinite(timestamp) ||
+		typeof signature !== "string"
+	) {
+		return c.json({ success: false, code: "MISSING_SESSION" }, 400);
+	}
+
+	const sessionCheck = await verifyGameSession({
+		sessionId,
+		gameId,
+		userId: user.id,
+		score,
+		timestamp,
+		signature
+	});
+
+	if (!sessionCheck.valid) {
+		return c.json({ success: false, code: sessionCheck.code }, 403);
 	}
 
 	try {
