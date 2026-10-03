@@ -17,6 +17,7 @@ import {
 } from "../../core/database/schema/schema";
 import { getFromBucket, listBucketObjects,uploadToBucket } from "../../core/shared/s3";
 import { type Env, requireAuth } from "../../middlewares/requireAuth";
+import { broadcastToRoom } from "../websockets/community_realtime";
 
 export const communityGamesRoute = new Hono<Env>();
 
@@ -373,9 +374,34 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
                                 });
                             }
 
+                            var realtimeListeners = { message: [], presence: [], matched: [], disconnect: [], reconnect: [], error: [] };
+
+                            function subscribe(kind, cb) {
+                                realtimeListeners[kind].push(cb);
+                                return function unsubscribe() {
+                                    var idx = realtimeListeners[kind].indexOf(cb);
+                                    if (idx !== -1) realtimeListeners[kind].splice(idx, 1);
+                                };
+                            }
+
+                            function emit(kind, payload) {
+                                var list = realtimeListeners[kind];
+                                if (!list) return;
+                                list.slice().forEach(function(cb) {
+                                    try { cb(payload); } catch (e) { console.error("DavidnetSDK: realtime listener error", e); }
+                                });
+                            }
+
                             window.addEventListener("message", function(event) {
                                 var message = event.data;
-                                if (!message || message.source !== DN_SOURCE || !message.requestId) return;
+                                if (!message || message.source !== DN_SOURCE) return;
+
+                                if (message.type === "event") {
+                                    emit(message.event, message.payload);
+                                    return;
+                                }
+
+                                if (!message.requestId) return;
                                 var handler = pending[message.requestId];
                                 if (!handler) return;
                                 delete pending[message.requestId];
@@ -449,6 +475,72 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
                                 // Resolves: { data, updatedAt } — data is null if nothing was saved yet.
                                 getJsonBlob: function() {
                                     return call("getJsonBlob", {});
+                                },
+
+                                // Generic real-time extension: rooms (pub/sub channels with presence) plus a
+                                // matchmaking queue. Content-agnostic - the platform never inspects "data", so
+                                // the same primitives work for a 2-player board game, a 50+ player shooter, or
+                                // a one-way live feed (e.g. a price ticker) with no "match" concept at all.
+                                // There is no maximum room size, queue size, or group size.
+                                realtime: {
+                                    // Opens the realtime connection. Called automatically by every other
+                                    // realtime.* method, so you only need this if you want to connect early.
+                                    connect: function() {
+                                        return call("realtimeConnect", {});
+                                    },
+                                    // Joins a named room (created on first join, destroyed when empty). You can
+                                    // join any number of rooms. Resolves: { room, members } - members is the
+                                    // list of everyone already in the room when you joined.
+                                    joinRoom: function(room) {
+                                        return call("realtimeJoinRoom", { room: room });
+                                    },
+                                    // Resolves: { room }
+                                    leaveRoom: function(room) {
+                                        return call("realtimeLeaveRoom", { room: room });
+                                    },
+                                    // Broadcasts arbitrary JSON-serializable data to everyone else currently in
+                                    // the room (pass { echo: true } to also receive your own message back via
+                                    // onMessage). Fire-and-forget - does not wait for delivery.
+                                    send: function(room, data, options) {
+                                        return call("realtimeSend", {
+                                            room: room,
+                                            data: data,
+                                            echo: !!(options && options.echo)
+                                        });
+                                    },
+                                    // Joins a named matchmaking queue. All callers joining the same queue name
+                                    // should agree on the same groupSize. Once "groupSize" callers are waiting,
+                                    // the server pops them off (FIFO) and auto-creates a room for them - listen
+                                    // with onMatched. "metadata" is optional and yours to use (e.g. skill level)
+                                    // for your own custom matching logic built on top of this primitive.
+                                    // Resolves: { queue, position }
+                                    joinQueue: function(queue, groupSize, metadata) {
+                                        return call("realtimeJoinQueue", {
+                                            queue: queue,
+                                            groupSize: groupSize,
+                                            metadata: metadata
+                                        });
+                                    },
+                                    // Resolves: { queue }
+                                    leaveQueue: function(queue) {
+                                        return call("realtimeLeaveQueue", { queue: queue });
+                                    },
+                                    // Fires for every message sent to a room you're in: { room, data, from, ts }.
+                                    // "from" is null for messages published via the server-side HTTP publish
+                                    // endpoint instead of by a connected player. Returns an unsubscribe function.
+                                    onMessage: function(cb) { return subscribe("message", cb); },
+                                    // Fires when someone joins/leaves a room you're in: { room, event, member }.
+                                    onPresence: function(cb) { return subscribe("presence", cb); },
+                                    // Fires when a queue you joined found a full group: { queue, room, members }.
+                                    onMatched: function(cb) { return subscribe("matched", cb); },
+                                    // Fires when the realtime connection drops unexpectedly (auto-reconnect is
+                                    // attempted in the background; your room memberships are silently restored).
+                                    onDisconnect: function(cb) { return subscribe("disconnect", cb); },
+                                    // Fires after a successful auto-reconnect, with the rooms that were rejoined.
+                                    onReconnect: function(cb) { return subscribe("reconnect", cb); },
+                                    // Fires on a server-side error that isn't tied to a specific call, e.g. you
+                                    // got rate-limited or sent to a room you're not in: { code, message }.
+                                    onError: function(cb) { return subscribe("error", cb); }
                                 }
                             };
                         } catch(e) {
@@ -997,6 +1089,50 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 	} catch (error) {
 		console.error("Failed to fetch highscores:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 10B. REALTIME: PUBLISH TO A ROOM OVER PLAIN HTTP ---
+// Complements the WebSocket "send" action (see websockets/community_realtime.ts). This lets a
+// one-way publisher broadcast into a room WITHOUT holding an open connection or being a member of
+// it - e.g. a developer's own backend pushing live price ticks into a "prices" room that players
+// only ever subscribe to. Same permission bar as everything else here: any non-banned authenticated
+// user who could play the game can publish to any of its rooms.
+communityGamesRoute.post("/:id/realtime/:room/publish", requireAuth, async (c) => {
+	const user = c.get("user");
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+	const room = c.req.param("room");
+
+	let body;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ success: false, code: "INVALID_JSON" }, 400);
+	}
+
+	if (body.data === undefined) {
+		return c.json({ success: false, code: "MISSING_DATA" }, 400);
+	}
+
+	try {
+		const [game] = await database
+			.select({ id: communityGame.id })
+			.from(communityGame)
+			.where(eq(communityGame.id, gameId))
+			.limit(1);
+
+		if (!game) return c.json({ success: false, code: "GAME_NOT_FOUND" }, 404);
+
+		const deliveredCount = broadcastToRoom(gameId, room, body.data);
+
+		return c.json({ success: true, code: "SUCCESS", deliveredCount });
+	} catch (error) {
+		console.error("Failed to publish realtime message:", error);
+		return c.json({ success: false, code: "PUBLISH_FAILED" }, 500);
 	}
 });
 
