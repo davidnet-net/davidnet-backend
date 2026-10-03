@@ -9,7 +9,8 @@ export const communityGameAuditActionEnum = authSchema.enum("community_game_audi
 	"edit_save",
 	"delete_save",
 	"edit_highscore",
-	"delete_highscore"
+	"delete_highscore",
+	"approve_highscore"
 ]);
 
 // --- TABLES ---
@@ -62,6 +63,11 @@ export const communityGameHighscores = authSchema.table(
 			.notNull()
 			.references(() => users.userId, { onDelete: "cascade" }),
 		score: integer("score").notNull(),
+		// Set when a score is a statistical outlier vs. the rest of the leaderboard (see the
+		// anomaly check in the highscore route). Flagged scores are excluded from the public
+		// leaderboard/global-best until a creator or moderator clears the flag.
+		flagged: boolean("flagged").default(false).notNull(),
+		flagReason: text("flag_reason"),
 		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
 	},
 	(table) => [primaryKey({ columns: [table.gameId, table.userId] })]

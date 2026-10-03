@@ -22,12 +22,28 @@ export const communityGamesRoute = new Hono<Env>();
 
 // Max size (in characters of the JSON string) allowed for a single save blob.
 const MAX_SAVE_JSON_LENGTH = 200_000;
-const MAX_HIGHSCORE_VALUE = 1_000_000_000_000;
+// Absolute sanity ceiling. Not per-game configurable on purpose: it's a last-resort backstop
+// against nonsense values (e.g. someone setting it to 30 billion); the anomaly flag below is what
+// actually adapts to what's reasonable for a specific game.
+const MAX_HIGHSCORE_VALUE = 100_000_000;
 
 // --- ANTI-CHEAT: per-session signed highscore submissions ---
 const SESSION_DURATION_MS = 6 * 60 * 60 * 1000; // 6 hours
 const SESSION_TIMESTAMP_SKEW_MS = 2 * 60 * 1000; // 2 minutes
+// A submission claiming to come from a session that only just started can't reflect real play.
+const MIN_SESSION_AGE_MS = 1_500;
+// Cooldown between accepted submissions from the same session, to stop someone script-probing
+// many candidate scores in rapid succession to find one that slips under the anomaly threshold.
+const MIN_SUBMIT_INTERVAL_MS = 2_000;
 const HEX_PATTERN = /^[0-9a-f]+$/i;
+
+// --- ANTI-CHEAT: anomaly flagging ---
+// A new score that blows way past the current (unflagged) leaderboard top gets stored but
+// excluded from the public leaderboard until a creator/moderator clears the flag. Only kicks in
+// once there's a real baseline, so the first few legitimate plays of a brand new game aren't
+// flagged against each other.
+const ANOMALY_SCORE_MULTIPLIER = 5;
+const ANOMALY_MIN_SAMPLE_SIZE = 3;
 
 // --- HELPER: CHECK IF USER IS BANNED ---
 async function checkIfBanned(userId: string, c: any): Promise<boolean> {
@@ -94,7 +110,13 @@ async function logGameAudit(entry: {
 	gameId: string;
 	creatorId: string;
 	targetUserId?: string | null;
-	action: "view_save" | "edit_save" | "delete_save" | "edit_highscore" | "delete_highscore";
+	action:
+		| "view_save"
+		| "edit_save"
+		| "delete_save"
+		| "edit_highscore"
+		| "delete_highscore"
+		| "approve_highscore";
 	details?: unknown;
 }): Promise<void> {
 	try {
@@ -151,6 +173,17 @@ async function verifyGameSession(params: {
 	// captured and replayed later to re-apply (or re-flag) the same score.
 	if (timestamp <= session.lastSignedTimestamp) {
 		return { valid: false, code: "REPLAYED_REQUEST" };
+	}
+
+	// A score can't be legitimate if it's submitted the instant the session was created.
+	if (timestamp - session.createdAt.getTime() < MIN_SESSION_AGE_MS) {
+		return { valid: false, code: "SESSION_TOO_NEW" };
+	}
+
+	// Cooldown between accepted submissions, so a script can't rapid-fire candidate scores to probe
+	// where the anomaly threshold sits.
+	if (session.lastSignedTimestamp > 0 && timestamp - session.lastSignedTimestamp < MIN_SUBMIT_INTERVAL_MS) {
+		return { valid: false, code: "RATE_LIMITED" };
 	}
 
 	const expectedSignature = createHmac("sha256", session.secret)
@@ -792,15 +825,21 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 
 		if (!game) return c.json({ success: false, code: "GAME_NOT_FOUND" }, 404);
 
+		// Anomaly check uses only the current, already-trusted (unflagged) leaderboard as its baseline.
 		const [prevGlobalTop] = await database
 			.select({ score: communityGameHighscores.score })
 			.from(communityGameHighscores)
-			.where(eq(communityGameHighscores.gameId, gameId))
+			.where(and(eq(communityGameHighscores.gameId, gameId), eq(communityGameHighscores.flagged, false)))
 			.orderBy(desc(communityGameHighscores.score))
 			.limit(1);
 
+		const [{ sampleSize }] = await database
+			.select({ sampleSize: sql<number>`count(*)::int` })
+			.from(communityGameHighscores)
+			.where(and(eq(communityGameHighscores.gameId, gameId), eq(communityGameHighscores.flagged, false)));
+
 		const [existing] = await database
-			.select({ score: communityGameHighscores.score })
+			.select({ score: communityGameHighscores.score, flagged: communityGameHighscores.flagged })
 			.from(communityGameHighscores)
 			.where(
 				and(eq(communityGameHighscores.gameId, gameId), eq(communityGameHighscores.userId, user.id))
@@ -809,25 +848,47 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 
 		const isNewPersonalBest = !existing || score > existing.score;
 
+		const isAnomalous =
+			sampleSize >= ANOMALY_MIN_SAMPLE_SIZE &&
+			!!prevGlobalTop &&
+			score > prevGlobalTop.score * ANOMALY_SCORE_MULTIPLIER;
+
 		if (isNewPersonalBest) {
 			await database
 				.insert(communityGameHighscores)
-				.values({ gameId, userId: user.id, score })
+				.values({
+					gameId,
+					userId: user.id,
+					score,
+					flagged: isAnomalous,
+					flagReason: isAnomalous
+						? `Score is more than ${ANOMALY_SCORE_MULTIPLIER}x the current leaderboard top (${prevGlobalTop!.score}).`
+						: null
+				})
 				.onConflictDoUpdate({
 					target: [communityGameHighscores.gameId, communityGameHighscores.userId],
-					set: { score, updatedAt: new Date() }
+					set: {
+						score,
+						flagged: isAnomalous,
+						flagReason: isAnomalous
+							? `Score is more than ${ANOMALY_SCORE_MULTIPLIER}x the current leaderboard top (${prevGlobalTop!.score}).`
+							: null,
+						updatedAt: new Date()
+					}
 				});
 		}
 
 		const playerHighscore = isNewPersonalBest ? score : existing!.score;
-		const isNewGlobalBest = !prevGlobalTop || playerHighscore > prevGlobalTop.score;
-		const globalHighscore = isNewGlobalBest ? playerHighscore : prevGlobalTop!.score;
+		const playerHighscoreFlagged = isNewPersonalBest ? isAnomalous : (existing?.flagged ?? false);
+		const isNewGlobalBest = !isAnomalous && (!prevGlobalTop || playerHighscore > prevGlobalTop.score);
+		const globalHighscore = isNewGlobalBest ? playerHighscore : (prevGlobalTop?.score ?? playerHighscore);
 
 		return c.json({
 			success: true,
 			code: "SUCCESS",
 			score,
 			playerHighscore,
+			playerHighscoreFlagged,
 			globalHighscore,
 			isNewPersonalBest,
 			isNewGlobalBest
@@ -848,6 +909,7 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 	const gameId = c.req.param("id");
 
 	try {
+		// Flagged scores are under review and excluded from everyone's public leaderboard view.
 		const leaderboard = await database
 			.select({
 				userId: communityGameHighscores.userId,
@@ -858,12 +920,12 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 			})
 			.from(communityGameHighscores)
 			.innerJoin(users, eq(communityGameHighscores.userId, users.userId))
-			.where(eq(communityGameHighscores.gameId, gameId))
+			.where(and(eq(communityGameHighscores.gameId, gameId), eq(communityGameHighscores.flagged, false)))
 			.orderBy(desc(communityGameHighscores.score))
 			.limit(10);
 
 		const [own] = await database
-			.select({ score: communityGameHighscores.score })
+			.select({ score: communityGameHighscores.score, flagged: communityGameHighscores.flagged })
 			.from(communityGameHighscores)
 			.where(
 				and(eq(communityGameHighscores.gameId, gameId), eq(communityGameHighscores.userId, user.id))
@@ -876,6 +938,7 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 			success: true,
 			code: "SUCCESS",
 			playerHighscore: own?.score ?? null,
+			playerHighscoreFlagged: own?.flagged ?? false,
 			globalHighscore: rankedLeaderboard[0] ?? null,
 			leaderboard: rankedLeaderboard
 		});
@@ -993,6 +1056,8 @@ communityGamesRoute.get("/:id/manage/players", requireAuth, async (c) => {
 			.select({
 				userId: communityGameHighscores.userId,
 				score: communityGameHighscores.score,
+				flagged: communityGameHighscores.flagged,
+				flagReason: communityGameHighscores.flagReason,
 				updatedAt: communityGameHighscores.updatedAt
 			})
 			.from(communityGameHighscores)
@@ -1030,6 +1095,8 @@ communityGamesRoute.get("/:id/manage/players", requireAuth, async (c) => {
 		const players = playerUsers.map((p) => ({
 			...p,
 			highscore: highscoreMap.get(p.userId)?.score ?? null,
+			highscoreFlagged: highscoreMap.get(p.userId)?.flagged ?? false,
+			highscoreFlagReason: highscoreMap.get(p.userId)?.flagReason ?? null,
 			highscoreUpdatedAt: highscoreMap.get(p.userId)?.updatedAt ?? null,
 			save: saveMap.get(p.userId)?.data ?? null,
 			saveUpdatedAt: saveMap.get(p.userId)?.updatedAt ?? null
@@ -1191,10 +1258,11 @@ communityGamesRoute.patch("/:id/manage/highscores/:userId", requireAuth, async (
 		const now = new Date();
 		await database
 			.insert(communityGameHighscores)
-			.values({ gameId, userId: targetUserId, score, updatedAt: now })
+			.values({ gameId, userId: targetUserId, score, flagged: false, flagReason: null, updatedAt: now })
 			.onConflictDoUpdate({
 				target: [communityGameHighscores.gameId, communityGameHighscores.userId],
-				set: { score, updatedAt: now }
+				// A manual edit by a creator/mod is itself a form of approval - clear any anomaly flag.
+				set: { score, flagged: false, flagReason: null, updatedAt: now }
 			});
 
 		await logGameAudit({
@@ -1209,6 +1277,45 @@ communityGamesRoute.patch("/:id/manage/highscores/:userId", requireAuth, async (
 	} catch (error) {
 		console.error("Failed to edit player highscore:", error);
 		return c.json({ success: false, code: "EDIT_FAILED" }, 500);
+	}
+});
+
+// --- 17B. MANAGE: APPROVE A FLAGGED HIGHSCORE AS-IS (creator / mods only) ---
+communityGamesRoute.post("/:id/manage/highscores/:userId/approve", requireAuth, async (c) => {
+	const user = c.get("user");
+	const gameId = c.req.param("id");
+	const targetUserId = c.req.param("userId");
+
+	if (!(await canManageGame(gameId, user.id))) {
+		return c.json({ success: false, code: "FORBIDDEN" }, 403);
+	}
+
+	try {
+		const [updated] = await database
+			.update(communityGameHighscores)
+			.set({ flagged: false, flagReason: null })
+			.where(
+				and(
+					eq(communityGameHighscores.gameId, gameId),
+					eq(communityGameHighscores.userId, targetUserId)
+				)
+			)
+			.returning({ score: communityGameHighscores.score });
+
+		if (!updated) return c.json({ success: false, code: "NOT_FOUND" }, 404);
+
+		await logGameAudit({
+			gameId,
+			creatorId: user.id,
+			targetUserId,
+			action: "approve_highscore",
+			details: { approvedScore: updated.score }
+		});
+
+		return c.json({ success: true, code: "SUCCESS" });
+	} catch (error) {
+		console.error("Failed to approve player highscore:", error);
+		return c.json({ success: false, code: "APPROVE_FAILED" }, 500);
 	}
 });
 
