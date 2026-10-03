@@ -1,0 +1,1 @@
+ALTER TABLE "auth"."community_games" ADD COLUMN "icon_filename" text;
