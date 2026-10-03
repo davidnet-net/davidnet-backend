@@ -27,6 +27,10 @@ const MAX_SAVE_JSON_LENGTH = 200_000;
 // actually adapts to what's reasonable for a specific game.
 const MAX_HIGHSCORE_VALUE = 100_000_000;
 
+// --- ICON UPLOAD ---
+const ALLOWED_ICON_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"];
+const MAX_ICON_SIZE_BYTES = 2 * 1024 * 1024; // 2MB
+
 // --- ANTI-CHEAT: per-session signed highscore submissions ---
 const SESSION_DURATION_MS = 6 * 60 * 60 * 1000; // 6 hours
 const SESSION_TIMESTAMP_SKEW_MS = 2 * 60 * 1000; // 2 minutes
@@ -222,6 +226,7 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 	const title = body["title"];
 	const description = body["description"];
 	const file = body["game"];
+	const iconFile = body["icon"];
 	const isAiGenerated = body["isAiGenerated"] === "true";
 
 	if (typeof title !== "string" || title.trim().length === 0) {
@@ -243,6 +248,24 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 		);
 	}
 
+	// Icon is optional - if the creator doesn't upload one, the frontend falls back to a default icon.
+	let iconFilename: string | null = null;
+	if (iconFile !== undefined) {
+		if (!(iconFile instanceof File)) {
+			return c.json({ success: false, code: "INVALID_ICON_FILE" }, 400);
+		}
+
+		if (!ALLOWED_ICON_TYPES.includes(iconFile.type)) {
+			return c.json({ success: false, code: "INVALID_ICON_TYPE" }, 400);
+		}
+
+		if (iconFile.size > MAX_ICON_SIZE_BYTES) {
+			return c.json({ success: false, code: "ICON_TOO_LARGE" }, 400);
+		}
+
+		iconFilename = `icon.${iconFile.type.split("/")[1]}`;
+	}
+
 	try {
 		const [newGame] = await database
 			.insert(communityGame)
@@ -251,7 +274,8 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 				title: title.trim(),
 				description: typeof description === "string" ? description.trim() : null,
 				isModerated: false,
-				isAiGenerated
+				isAiGenerated,
+				iconFilename
 			})
 			.returning();
 
@@ -467,6 +491,13 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 
 		await Promise.all(uploadPromises);
 
+		// Uploaded after the zip's own files, so a dedicated icon always wins over a same-named file
+		// that happened to be packaged inside the zip.
+		if (iconFile instanceof File && iconFilename) {
+			const iconBuffer = Buffer.from(await iconFile.arrayBuffer());
+			await uploadToBucket("communitygames", `${gameId}/${iconFilename}`, iconBuffer, iconFile.type);
+		}
+
 		if (!hasIndexHtml) {
 			await database.delete(communityGame).where(eq(communityGame.id, gameId));
 			return c.json(
@@ -498,6 +529,7 @@ communityGamesRoute.get("/feed", requireAuth, async (c) => {
 				id: communityGame.id,
 				title: communityGame.title,
 				description: communityGame.description,
+				iconFilename: communityGame.iconFilename,
 				likesCount: communityGame.likesCount,
 				isAiGenerated: communityGame.isAiGenerated,
 				createdAt: communityGame.createdAt,
@@ -648,6 +680,7 @@ communityGamesRoute.get("/:id", requireAuth, async (c) => {
 				id: communityGame.id,
 				title: communityGame.title,
 				description: communityGame.description,
+				iconFilename: communityGame.iconFilename,
 				likesCount: communityGame.likesCount,
 				isModerated: communityGame.isModerated,
 				isAiGenerated: communityGame.isAiGenerated,

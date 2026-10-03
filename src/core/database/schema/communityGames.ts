@@ -25,6 +25,10 @@ export const communityGame = authSchema.table("community_games", {
 	title: text("title").notNull(),
 	description: text("description"),
 
+	// Filename of the uploaded icon within this game's "communitygames" bucket prefix
+	// (e.g. "icon.png"), null if the creator didn't upload one (default puzzle icon is used instead).
+	iconFilename: text("icon_filename"),
+
 	// Metrics
 	likesCount: integer("likes_count").default(0).notNull(),
 	isModerated: boolean("is_moderated").default(false).notNull(),
