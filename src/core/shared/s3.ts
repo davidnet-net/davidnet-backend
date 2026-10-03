@@ -7,7 +7,9 @@ import {
 
 export const s3 = new S3Client({
 	region: "garage",
-	endpoint: "http://garage.garage.svc.cluster.local:3900",
+	// Defaults to the in-cluster Garage service used in prod; override with GARAGE_ENDPOINT
+	// (e.g. http://localhost:3900) to point at the local docker-compose Garage instead.
+	endpoint: process.env.GARAGE_ENDPOINT || "http://garage.garage.svc.cluster.local:3900",
 	forcePathStyle: true,
 	credentials: {
 		accessKeyId: process.env.GARAGE_ACCESS_KEY!,

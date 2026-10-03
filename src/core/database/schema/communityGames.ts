@@ -1,6 +1,16 @@
 import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
-import { boolean, integer, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+
 import { authSchema, users } from "./auth";
+
+// --- ENUMS ---
+export const communityGameAuditActionEnum = authSchema.enum("community_game_audit_action", [
+	"view_save",
+	"edit_save",
+	"delete_save",
+	"edit_highscore",
+	"delete_highscore"
+]);
 
 // --- TABLES ---
 export const communityGame = authSchema.table("community_games", {
@@ -17,6 +27,9 @@ export const communityGame = authSchema.table("community_games", {
 	// Metrics
 	likesCount: integer("likes_count").default(0).notNull(),
 	isModerated: boolean("is_moderated").default(false).notNull(),
+
+	// Disclosure: was this game built entirely by AI (not just AI-assisted)?
+	isAiGenerated: boolean("is_ai_generated").default(false).notNull(),
 
 	// Timestamps
 	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -38,9 +51,68 @@ export const communityGameLikes = authSchema.table(
 	(table) => [primaryKey({ columns: [table.userId, table.gameId] })]
 );
 
+// Per-player highscore for a community game. Global leaderboard = order by score desc.
+export const communityGameHighscores = authSchema.table(
+	"community_game_highscores",
+	{
+		gameId: uuid("game_id")
+			.notNull()
+			.references(() => communityGame.id, { onDelete: "cascade" }),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.userId, { onDelete: "cascade" }),
+		score: integer("score").notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.gameId, table.userId] })]
+);
+
+// Arbitrary JSON save-data blob per player per community game.
+export const communityGameSaves = authSchema.table(
+	"community_game_saves",
+	{
+		gameId: uuid("game_id")
+			.notNull()
+			.references(() => communityGame.id, { onDelete: "cascade" }),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.userId, { onDelete: "cascade" }),
+		data: jsonb("data").notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.gameId, table.userId] })]
+);
+
+// Audit trail of creator/moderator actions performed on a player's save or highscore data.
+export const communityGameAuditLog = authSchema.table("community_game_audit_log", {
+	id: uuid("id")
+		.primaryKey()
+		.default(sql`uuidv7()`),
+	gameId: uuid("game_id")
+		.notNull()
+		.references(() => communityGame.id, { onDelete: "cascade" }),
+	creatorId: uuid("creator_id")
+		.notNull()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	// Null = bulk action affecting the whole player list (e.g. viewing the manage overview).
+	targetUserId: uuid("target_user_id").references(() => users.userId, { onDelete: "cascade" }),
+	action: communityGameAuditActionEnum("action").notNull(),
+	details: jsonb("details"),
+	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
+});
+
 // --- TYPE EXPORTS ---
 export type CommunityGame = InferSelectModel<typeof communityGame>;
 export type NewCommunityGame = InferInsertModel<typeof communityGame>;
 
 export type CommunityGameLike = InferSelectModel<typeof communityGameLikes>;
 export type NewCommunityGameLike = InferInsertModel<typeof communityGameLikes>;
+
+export type CommunityGameHighscore = InferSelectModel<typeof communityGameHighscores>;
+export type NewCommunityGameHighscore = InferInsertModel<typeof communityGameHighscores>;
+
+export type CommunityGameSave = InferSelectModel<typeof communityGameSaves>;
+export type NewCommunityGameSave = InferInsertModel<typeof communityGameSaves>;
+
+export type CommunityGameAuditLog = InferSelectModel<typeof communityGameAuditLog>;
+export type NewCommunityGameAuditLog = InferInsertModel<typeof communityGameAuditLog>;

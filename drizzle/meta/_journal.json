@@ -232,6 +232,13 @@
       "when": 1790504959451,
       "tag": "0032_polite_starhawk",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1791034434735,
+      "tag": "0033_hesitant_scorpion",
+      "breakpoints": true
     }
   ]
 }
