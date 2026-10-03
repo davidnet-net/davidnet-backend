@@ -1,5 +1,5 @@
 import AdmZip from "adm-zip";
-import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { and, desc, eq, inArray,sql } from "drizzle-orm";
 import { Hono } from "hono";
 
@@ -141,11 +141,13 @@ async function verifyGameSession(params: {
 	sessionId: string;
 	gameId: string;
 	userId: string;
-	score: number;
+	// The value being attested to - the score for a highscore submission, or a hash of the
+	// serialized save blob for a save submission.
+	payload: string;
 	timestamp: number;
 	signature: string;
 }): Promise<{ valid: true } | { valid: false; code: string }> {
-	const { sessionId, gameId, userId, score, timestamp, signature } = params;
+	const { sessionId, gameId, userId, payload, timestamp, signature } = params;
 
 	if (!HEX_PATTERN.test(signature) || signature.length % 2 !== 0) {
 		return { valid: false, code: "INVALID_SIGNATURE" };
@@ -187,7 +189,7 @@ async function verifyGameSession(params: {
 	}
 
 	const expectedSignature = createHmac("sha256", session.secret)
-		.update(`${sessionId}:${gameId}:${score}:${timestamp}`)
+		.update(`${sessionId}:${gameId}:${payload}:${timestamp}`)
 		.digest("hex");
 
 	const signatureBuffer = Buffer.from(signature, "hex");
@@ -401,7 +403,24 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
                                 },
                                 // Persist an arbitrary JSON-serializable save object (max ~200kb). Resolves: { savedAt }
                                 saveJsonBlob: function(data) {
-                                    return call("saveJsonBlob", { data: data });
+                                    return sessionReady.then(function(session) {
+                                        var serialized = JSON.stringify(data);
+                                        var timestamp = Date.now();
+                                        var enc = new TextEncoder();
+                                        return crypto.subtle.digest("SHA-256", enc.encode(serialized))
+                                            .then(hexFromBuffer)
+                                            .then(function(dataHash) {
+                                                var message = session.sessionId + ":" + GAME_ID + ":" + dataHash + ":" + timestamp;
+                                                return signMessage(session.secret, message).then(function(signature) {
+                                                    return call("saveJsonBlob", {
+                                                        data: data,
+                                                        sessionId: session.sessionId,
+                                                        timestamp: timestamp,
+                                                        signature: signature
+                                                    });
+                                                });
+                                            });
+                                    });
                                 },
                                 // Resolves: { data, updatedAt } — data is null if nothing was saved yet.
                                 getJsonBlob: function() {
@@ -807,7 +826,7 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 		sessionId,
 		gameId,
 		userId: user.id,
-		score,
+		payload: String(score),
 		timestamp,
 		signature
 	});
@@ -970,6 +989,34 @@ communityGamesRoute.post("/:id/save", requireAuth, async (c) => {
 	const serialized = JSON.stringify(body.data);
 	if (serialized.length > MAX_SAVE_JSON_LENGTH) {
 		return c.json({ success: false, code: "SAVE_TOO_LARGE" }, 413);
+	}
+
+	const sessionId = body.sessionId;
+	const timestamp = Number(body.timestamp);
+	const signature = body.signature;
+
+	if (
+		typeof sessionId !== "string" ||
+		!Number.isFinite(timestamp) ||
+		typeof signature !== "string"
+	) {
+		return c.json({ success: false, code: "MISSING_SESSION" }, 400);
+	}
+
+	// Sign over a hash of the save blob rather than the (up to 200kb) blob itself.
+	const dataHash = createHash("sha256").update(serialized).digest("hex");
+
+	const sessionCheck = await verifyGameSession({
+		sessionId,
+		gameId,
+		userId: user.id,
+		payload: dataHash,
+		timestamp,
+		signature
+	});
+
+	if (!sessionCheck.valid) {
+		return c.json({ success: false, code: sessionCheck.code }, 403);
 	}
 
 	try {
