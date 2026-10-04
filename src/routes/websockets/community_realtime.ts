@@ -3,11 +3,11 @@
 // Generic real-time extension to the community games SDK: rooms (pub/sub channels) + presence +
 // a matchmaking queue primitive. Deliberately content-agnostic - the server never looks at the
 // shape of `data` being relayed, so the same primitives work for a 2-player turn-based game, a
-// 50+ player shooter, or a one-way broadcast feed (e.g. a live price ticker) with no players at
-// all on the publishing side. There is intentionally no cap on room size, queue size, or group
-// size anywhere in this file - only a per-connection message-rate/size guard to protect this
-// single backend instance from a runaway or malicious client, same spirit as the anti-cheat rate
-// limiting in community-games.ts.
+// 50+ player shooter, or a one-way broadcast feed (e.g. a live price ticker, published into the
+// room by one connected client for everyone else to listen to). There is intentionally no cap on
+// room size, queue size, or group size anywhere in this file - only a per-connection
+// message-rate/size guard to protect this single backend instance from a runaway or malicious
+// client, same spirit as the anti-cheat rate limiting in community-games.ts.
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
@@ -188,25 +188,6 @@ function broadcastToRoomMembers(
 		if (member === exclude) continue;
 		if (member.ws && member.ws.readyState === 1) member.ws.send(msgStr);
 	}
-}
-
-// Pushes into a room from OUTSIDE a connected client - used by the plain-HTTP publish endpoint in
-// community-games.ts, so a one-way feed (price ticker, server-driven event, etc.) can broadcast to
-// subscribers without itself being a "player" in the room. `from` is null in this case, since
-// there's no connected member to attribute the message to.
-export function broadcastToRoom(gameId: string, room: string, data: unknown): number {
-	const members = roomMembers.get(gameId)?.get(room);
-	if (!members || members.size === 0) return 0;
-	const frame = { type: "message", room, data, from: null, ts: Date.now() };
-	const msgStr = JSON.stringify(frame);
-	let count = 0;
-	for (const member of members) {
-		if (member.ws && member.ws.readyState === 1) {
-			member.ws.send(msgStr);
-			count++;
-		}
-	}
-	return count;
 }
 
 function leaveRoom(client: RealtimeClient, room: string) {

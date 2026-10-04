@@ -17,7 +17,6 @@ import {
 } from "../../core/database/schema/schema";
 import { getFromBucket, listBucketObjects,uploadToBucket } from "../../core/shared/s3";
 import { type Env, requireAuth } from "../../middlewares/requireAuth";
-import { broadcastToRoom } from "../websockets/community_realtime";
 
 export const communityGamesRoute = new Hono<Env>();
 
@@ -526,8 +525,7 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
                                         return call("realtimeLeaveQueue", { queue: queue });
                                     },
                                     // Fires for every message sent to a room you're in: { room, data, from, ts }.
-                                    // "from" is null for messages published via the server-side HTTP publish
-                                    // endpoint instead of by a connected player. Returns an unsubscribe function.
+                                    // Returns an unsubscribe function.
                                     onMessage: function(cb) { return subscribe("message", cb); },
                                     // Fires when someone joins/leaves a room you're in: { room, event, member }.
                                     onPresence: function(cb) { return subscribe("presence", cb); },
@@ -1089,50 +1087,6 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 	} catch (error) {
 		console.error("Failed to fetch highscores:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
-	}
-});
-
-// --- 10B. REALTIME: PUBLISH TO A ROOM OVER PLAIN HTTP ---
-// Complements the WebSocket "send" action (see websockets/community_realtime.ts). This lets a
-// one-way publisher broadcast into a room WITHOUT holding an open connection or being a member of
-// it - e.g. a developer's own backend pushing live price ticks into a "prices" room that players
-// only ever subscribe to. Same permission bar as everything else here: any non-banned authenticated
-// user who could play the game can publish to any of its rooms.
-communityGamesRoute.post("/:id/realtime/:room/publish", requireAuth, async (c) => {
-	const user = c.get("user");
-	if (await checkIfBanned(user.id, c)) {
-		return c.json({ success: false, code: "BANNED" }, 403);
-	}
-
-	const gameId = c.req.param("id");
-	const room = c.req.param("room");
-
-	let body;
-	try {
-		body = await c.req.json();
-	} catch {
-		return c.json({ success: false, code: "INVALID_JSON" }, 400);
-	}
-
-	if (body.data === undefined) {
-		return c.json({ success: false, code: "MISSING_DATA" }, 400);
-	}
-
-	try {
-		const [game] = await database
-			.select({ id: communityGame.id })
-			.from(communityGame)
-			.where(eq(communityGame.id, gameId))
-			.limit(1);
-
-		if (!game) return c.json({ success: false, code: "GAME_NOT_FOUND" }, 404);
-
-		const deliveredCount = broadcastToRoom(gameId, room, body.data);
-
-		return c.json({ success: true, code: "SUCCESS", deliveredCount });
-	} catch (error) {
-		console.error("Failed to publish realtime message:", error);
-		return c.json({ success: false, code: "PUBLISH_FAILED" }, 500);
 	}
 });
 
