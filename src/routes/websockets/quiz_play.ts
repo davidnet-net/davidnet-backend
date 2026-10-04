@@ -1,14 +1,15 @@
+import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
+
 import { database } from "../../core/database/client";
 import {
 	quizSessions,
 	sessionParticipants,
 	sessionResponses
 } from "../../core/database/schema/quiz";
-import { eq, sql } from "drizzle-orm";
-import { broadcastToPresenters } from "./quiz_present";
 import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
+import { broadcastToPresenters } from "./quiz_present";
 
 type PlayerConnection = {
 	ws: any;
@@ -152,12 +153,14 @@ function evaluateAnswer(
 		case "scale": {
 			const raw = Number(data.value);
 			if (!Number.isFinite(raw)) return null;
-			const min = typeof presenterPayload?.question?.settings?.min === "number"
-				? presenterPayload.question.settings.min
-				: raw;
-			const max = typeof presenterPayload?.question?.settings?.max === "number"
-				? presenterPayload.question.settings.max
-				: raw;
+			const min =
+				typeof presenterPayload?.question?.settings?.min === "number"
+					? presenterPayload.question.settings.min
+					: raw;
+			const max =
+				typeof presenterPayload?.question?.settings?.max === "number"
+					? presenterPayload.question.settings.max
+					: raw;
 			const value = Math.min(Math.max(raw, min), max);
 			return {
 				isCorrect: true,
@@ -190,7 +193,11 @@ function evaluateAnswer(
 			if (!text) return null;
 			const acceptedAnswers = options
 				.filter((o) => o.isCorrect !== false)
-				.map((o) => String(o.text || "").trim().toLowerCase());
+				.map((o) =>
+					String(o.text || "")
+						.trim()
+						.toLowerCase()
+				);
 			const isCorrect = acceptedAnswers.includes(text.toLowerCase());
 			return {
 				isCorrect,
@@ -274,7 +281,7 @@ export async function kickParticipant(playerId: string, sessionId: string, nickn
 
 export async function terminateSessionPlayers(
 	sessionId: string,
-	reason: string = "The host has ended the presentation."
+	reason = "The host has ended the presentation."
 ) {
 	const participants = await database
 		.select()
@@ -358,7 +365,7 @@ playWs.get(
 	upgradeWebSocket((c) => {
 		const session = c.get("session");
 		const sessionId = session.id;
-		let connectionId = crypto.randomUUID();
+		const connectionId = crypto.randomUUID();
 		let participantId: string | null = null;
 
 		return {
@@ -413,7 +420,7 @@ playWs.get(
 							return;
 						}
 
-						let pId = data.participantId;
+						const pId = data.participantId;
 						let participant: any;
 
 						if (pId) {

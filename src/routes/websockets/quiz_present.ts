@@ -1,26 +1,27 @@
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
+import { getCookie } from "hono/cookie";
+import { verify } from "hono/jwt";
+
 import { database } from "../../core/database/client";
 import {
-	quizzes,
-	quizCollaborators,
-	quizSessions,
 	questions,
+	quizCollaborators,
 	quizOptions,
-	sessionParticipants,
-	type QuizSession
+	type QuizSession,
+	quizSessions,
+	quizzes,
+	sessionParticipants
 } from "../../core/database/schema/quiz";
-import { eq, and, inArray, desc } from "drizzle-orm";
 import { hasPermission } from "../../core/shared/checkPermissions";
-import { verify } from "hono/jwt";
-import { getCookie } from "hono/cookie";
+import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
 import {
-	kickParticipant,
 	broadcastToSessionPlayers,
+	kickParticipant,
 	terminateSessionPlayers,
 	wsByParticipant
 } from "./quiz_play";
-import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
 
 type PresenterConnection = {
 	ws: any;
@@ -290,7 +291,7 @@ presentWs.get(
 		const session = c.get("session");
 		const quizName = c.get("quizName");
 		const sessionId = session.id;
-		let connectionId = crypto.randomUUID();
+		const connectionId = crypto.randomUUID();
 
 		return {
 			async onOpen(event, ws) {

@@ -31,12 +31,7 @@ export const requestStatusEnum = authSchema.enum("request_status", [
 
 export const mediaTypeEnum = authSchema.enum("media_type", ["image", "youtube"]);
 
-export const revealModeEnum = authSchema.enum("reveal_mode", [
-	"instant",
-	"fade",
-	"blur",
-	"slide"
-]);
+export const revealModeEnum = authSchema.enum("reveal_mode", ["instant", "fade", "blur", "slide"]);
 
 // --- TABLES ---
 export const quizzes = authSchema.table("quizzes", {
