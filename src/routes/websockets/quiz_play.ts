@@ -84,6 +84,152 @@ if ((globalThis as any)[GLOBAL_INTERVAL_KEY]) {
 	}
 }, HEARTBEAT_TICK_MS);
 
+function timeBasedPoints(responseTimeMs: number, timeLimitMs: number, multiplier: number): number {
+	const clampRatio = Math.min(Math.max(responseTimeMs / timeLimitMs, 0), 1);
+	return Math.round((1 - clampRatio / 2) * 1000 * multiplier);
+}
+
+type AnswerEvaluation = {
+	isCorrect: boolean;
+	pointsEarned: number;
+	breakdownKeys: string[];
+	selectedOptionId: string | null;
+	textResponse: string | null;
+};
+
+/**
+ * Evaluates an incoming SUBMIT_ANSWER payload against the active question.
+ * Returns null when the payload is structurally invalid for the question type
+ * (caller should silently drop it). breakdownKeys always reuses the same
+ * `selectedOptionIds` field/aggregation used for option-based types so a
+ * single breakdown-counting code path works for every question type:
+ * option ids for quiz/true_false/poll, the numeric value for scale/slider,
+ * the submitted text for type_answer/word_cloud, and correct/incorrect for puzzle.
+ */
+function evaluateAnswer(
+	type: string,
+	data: any,
+	presenterPayload: any,
+	correctOrder: string[] | null,
+	responseTimeMs: number,
+	timeLimitMs: number,
+	multiplier: number
+): AnswerEvaluation | null {
+	const options: any[] = presenterPayload?.options || [];
+
+	switch (type) {
+		case "quiz":
+		case "true_false": {
+			const submittedIds = Array.isArray(data.optionIds)
+				? data.optionIds.filter((id: any) => typeof id === "string")
+				: [];
+			if (submittedIds.length === 0) return null;
+			const correctOptions = options.filter((o) => o.isCorrect).map((o) => o.id);
+			const isCorrect =
+				submittedIds.length === correctOptions.length &&
+				submittedIds.every((id: string) => correctOptions.includes(id));
+			return {
+				isCorrect,
+				pointsEarned: isCorrect ? timeBasedPoints(responseTimeMs, timeLimitMs, multiplier) : 0,
+				breakdownKeys: submittedIds,
+				selectedOptionId: submittedIds[0] || null,
+				textResponse: null
+			};
+		}
+		case "poll": {
+			const submittedIds = Array.isArray(data.optionIds)
+				? data.optionIds.filter((id: any) => typeof id === "string")
+				: [];
+			if (submittedIds.length === 0) return null;
+			return {
+				isCorrect: true,
+				pointsEarned: 0,
+				breakdownKeys: submittedIds,
+				selectedOptionId: submittedIds[0] || null,
+				textResponse: null
+			};
+		}
+		case "scale": {
+			const raw = Number(data.value);
+			if (!Number.isFinite(raw)) return null;
+			const min = typeof presenterPayload?.question?.settings?.min === "number"
+				? presenterPayload.question.settings.min
+				: raw;
+			const max = typeof presenterPayload?.question?.settings?.max === "number"
+				? presenterPayload.question.settings.max
+				: raw;
+			const value = Math.min(Math.max(raw, min), max);
+			return {
+				isCorrect: true,
+				pointsEarned: 0,
+				breakdownKeys: [String(value)],
+				selectedOptionId: null,
+				textResponse: String(value)
+			};
+		}
+		case "slider": {
+			const raw = Number(data.value);
+			if (!Number.isFinite(raw)) return null;
+			const settings = presenterPayload?.question?.settings || {};
+			const min = typeof settings.min === "number" ? settings.min : raw;
+			const max = typeof settings.max === "number" ? settings.max : raw;
+			const correctValue = typeof settings.correctValue === "number" ? settings.correctValue : raw;
+			const tolerance = typeof settings.tolerance === "number" ? settings.tolerance : 0;
+			const value = Math.min(Math.max(raw, min), max);
+			const isCorrect = Math.abs(value - correctValue) <= tolerance;
+			return {
+				isCorrect,
+				pointsEarned: isCorrect ? timeBasedPoints(responseTimeMs, timeLimitMs, multiplier) : 0,
+				breakdownKeys: [String(value)],
+				selectedOptionId: null,
+				textResponse: String(value)
+			};
+		}
+		case "type_answer": {
+			const text = typeof data.text === "string" ? data.text.trim().substring(0, 200) : "";
+			if (!text) return null;
+			const acceptedAnswers = options
+				.filter((o) => o.isCorrect !== false)
+				.map((o) => String(o.text || "").trim().toLowerCase());
+			const isCorrect = acceptedAnswers.includes(text.toLowerCase());
+			return {
+				isCorrect,
+				pointsEarned: isCorrect ? timeBasedPoints(responseTimeMs, timeLimitMs, multiplier) : 0,
+				breakdownKeys: [text],
+				selectedOptionId: null,
+				textResponse: text
+			};
+		}
+		case "word_cloud": {
+			const text = typeof data.text === "string" ? data.text.trim().substring(0, 40) : "";
+			if (!text) return null;
+			return {
+				isCorrect: true,
+				pointsEarned: 0,
+				breakdownKeys: [text],
+				selectedOptionId: null,
+				textResponse: text
+			};
+		}
+		case "puzzle": {
+			const order = Array.isArray(data.order)
+				? data.order.filter((id: any) => typeof id === "string")
+				: null;
+			if (!order || !correctOrder || order.length !== correctOrder.length) return null;
+			const isCorrect = order.every((id: string, i: number) => id === correctOrder[i]);
+			return {
+				isCorrect,
+				pointsEarned: isCorrect ? timeBasedPoints(responseTimeMs, timeLimitMs, multiplier) : 0,
+				breakdownKeys: [isCorrect ? "correct" : "incorrect"],
+				selectedOptionId: null,
+				textResponse: JSON.stringify(order)
+			};
+		}
+		default:
+			return null;
+	}
+}
+
 export function broadcastToSessionPlayers(sessionId: string, message: any) {
 	const msgStr = JSON.stringify(message);
 	wsByParticipant.forEach((conn: PlayerConnection) => {
@@ -401,6 +547,7 @@ playWs.get(
 						if (!activeSession || activeSession.phase !== "active") return;
 						if (activeSession.responses.has(participantId)) return; // Prevent double answering
 
+						const qType = activeSession.presenterPayload.question.type;
 						const qId = activeSession.presenterPayload.question.id;
 						const timeLimitMs = activeSession.durationMs;
 						const multiplier = activeSession.presenterPayload.question.pointsMultiplier || 1;
@@ -410,27 +557,23 @@ playWs.get(
 						// Grace period allowed (1.5 seconds)
 						if (responseTimeMs > timeLimitMs + 1500) return;
 
-						let submittedIds = Array.isArray(data.optionIds) ? data.optionIds : [];
-						const correctOptions = activeSession.presenterPayload.options
-							.filter((o: any) => o.isCorrect)
-							.map((o: any) => o.id);
-
-						// Exact match required for multi-select and standard
-						const isCorrect =
-							submittedIds.length === correctOptions.length &&
-							submittedIds.every((id: string) => correctOptions.includes(id));
-
-						// Kahoot Points Formula
-						let pointsEarned = 0;
-						if (isCorrect) {
-							const clampRatio = Math.min(Math.max(responseTimeMs / timeLimitMs, 0), 1);
-							pointsEarned = Math.round((1 - clampRatio / 2) * 1000 * multiplier);
-						}
+						const evaluation = evaluateAnswer(
+							qType,
+							data,
+							activeSession.presenterPayload,
+							activeSession.correctOrder || null,
+							responseTimeMs,
+							timeLimitMs,
+							multiplier
+						);
+						if (!evaluation) return;
+						const { isCorrect, pointsEarned, breakdownKeys, selectedOptionId, textResponse } =
+							evaluation;
 
 						activeSession.responses.set(participantId, {
 							isCorrect,
 							pointsEarned,
-							selectedOptionIds: submittedIds
+							selectedOptionIds: breakdownKeys
 						});
 
 						// Fire and forget DB insertion
@@ -440,7 +583,8 @@ playWs.get(
 								sessionId,
 								questionId: qId,
 								participantId: participantId,
-								selectedOptionId: submittedIds[0] || null,
+								selectedOptionId,
+								textResponse,
 								answerTimeMs: responseTimeMs,
 								pointsEarned: pointsEarned
 							})

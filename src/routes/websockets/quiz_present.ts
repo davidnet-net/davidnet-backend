@@ -115,26 +115,69 @@ async function generateUniquePin(): Promise<string> {
 	return pin;
 }
 
+const SUPPORTED_TYPES = [
+	"quiz",
+	"true_false",
+	"slider",
+	"puzzle",
+	"type_answer",
+	"poll",
+	"word_cloud",
+	"scale",
+	"information"
+];
+
 function isQuestionInvalid(q: any, options: any[]): boolean {
-	const SUPPORTED_TYPES = ["quiz", "true_false"];
 	if (!q.type || !SUPPORTED_TYPES.includes(q.type)) return true;
 	const questionText = q.text?.trim() || "";
 	if (!questionText || questionText.length > 250) return true;
 
-	if (q.type === "true_false") {
-		const correctCount = options.filter((opt) => opt.isCorrect).length;
-		return options.length !== 2 || correctCount !== 1;
-	}
+	const filledOptions = options.filter((opt) => (opt.text?.trim() || "").length > 0);
 
-	if (q.type === "quiz") {
-		const filledOptions = options.filter((opt) => (opt.text?.trim() || "").length > 0);
-		if (filledOptions.length < 2) return true;
-		if (filledOptions.some((opt) => opt.text.trim().length > 100)) return true;
-		const correctCount = filledOptions.filter((opt) => opt.isCorrect).length;
-		if (!q.isMultiSelect && correctCount !== 1) return true;
-		if (q.isMultiSelect && correctCount < 2) return true;
+	switch (q.type) {
+		case "true_false": {
+			const correctCount = options.filter((opt) => opt.isCorrect).length;
+			return options.length !== 2 || correctCount !== 1;
+		}
+		case "quiz": {
+			if (filledOptions.length < 2) return true;
+			if (filledOptions.some((opt) => opt.text.trim().length > 100)) return true;
+			const correctCount = filledOptions.filter((opt) => opt.isCorrect).length;
+			if (!q.isMultiSelect && correctCount !== 1) return true;
+			if (q.isMultiSelect && correctCount < 2) return true;
+			return false;
+		}
+		case "poll":
+		case "puzzle": {
+			if (filledOptions.length < 2) return true;
+			if (filledOptions.some((opt) => opt.text.trim().length > 100)) return true;
+			return false;
+		}
+		case "type_answer": {
+			if (filledOptions.length < 1) return true;
+			if (filledOptions.some((opt) => opt.text.trim().length > 100)) return true;
+			return false;
+		}
+		case "slider": {
+			const s = q.settings;
+			if (!s || typeof s.min !== "number" || typeof s.max !== "number") return true;
+			if (typeof s.correctValue !== "number") return true;
+			if (s.min >= s.max) return true;
+			if (s.correctValue < s.min || s.correctValue > s.max) return true;
+			return false;
+		}
+		case "scale": {
+			const s = q.settings;
+			if (!s || typeof s.min !== "number" || typeof s.max !== "number") return true;
+			if (s.min >= s.max) return true;
+			return false;
+		}
+		case "word_cloud":
+		case "information":
+			return false;
+		default:
+			return true;
 	}
-	return false;
 }
 
 presentWs.get(
@@ -524,6 +567,9 @@ async function triggerQuestionPhase(quizId: string, sessionId: string, questionI
 		.orderBy(quizOptions.position);
 	const slotColors = qOptions.map((o) => o.color);
 
+	// Server-only: the correct sequence for puzzle questions. Never sent to clients.
+	const correctOrder = targetQ.type === "puzzle" ? qOptions.map((o) => o.id) : null;
+
 	const shuffledOptions = [...qOptions];
 	for (let i = shuffledOptions.length - 1; i > 0; i--) {
 		const j = Math.floor(Math.random() * (i + 1));
@@ -534,12 +580,27 @@ async function triggerQuestionPhase(quizId: string, sessionId: string, questionI
 	});
 
 	const presenterPayload = { question: targetQ, options: shuffledOptions };
-	const playerOptions = shuffledOptions.map((o) => ({
-		id: o.id,
-		text: o.text,
-		color: o.color,
-		position: o.position
-	}));
+
+	// type_answer options ARE the accepted answers, so they must never reach the player.
+	// Puzzle options drop their original `position` (the correct-order answer) and are
+	// identified by shuffled array index on the client instead.
+	const playerOptions =
+		targetQ.type === "type_answer"
+			? []
+			: shuffledOptions.map((o) => ({ id: o.id, text: o.text, color: o.color }));
+
+	let publicSettings: Record<string, number | string> | undefined;
+	const qSettings = targetQ.settings as Record<string, number | string> | null;
+	if (qSettings && targetQ.type === "slider") {
+		publicSettings = { min: qSettings.min, max: qSettings.max, step: qSettings.step };
+	} else if (qSettings && targetQ.type === "scale") {
+		publicSettings = {
+			min: qSettings.min,
+			max: qSettings.max,
+			minLabel: qSettings.minLabel,
+			maxLabel: qSettings.maxLabel
+		};
+	}
 
 	const playerPayload = {
 		question: {
@@ -548,7 +609,8 @@ async function triggerQuestionPhase(quizId: string, sessionId: string, questionI
 			type: targetQ.type,
 			timeLimit: targetQ.timeLimit,
 			isMultiSelect: targetQ.isMultiSelect,
-			pointsMultiplier: targetQ.pointsMultiplier
+			pointsMultiplier: targetQ.pointsMultiplier,
+			settings: publicSettings
 		},
 		options: playerOptions
 	};
@@ -564,6 +626,7 @@ async function triggerQuestionPhase(quizId: string, sessionId: string, questionI
 		durationMs: previewDurationMs,
 		presenterPayload,
 		playerPayload,
+		correctOrder,
 		responses: new Map<string, any>(),
 		resultsBreakdown: {},
 		leaderboard: []

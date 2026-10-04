@@ -232,6 +232,44 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 							? (q.revealMode as NewQuestion["revealMode"])
 							: "instant";
 
+					let safeSettings: Record<string, number | string> | null = null;
+					if (q.settings && typeof q.settings === "object") {
+						const s = q.settings;
+						if (safeType === "slider") {
+							const min = typeof s.min === "number" && !isNaN(s.min) ? s.min : 0;
+							const max =
+								typeof s.max === "number" && !isNaN(s.max) && s.max > min ? s.max : min + 100;
+							safeSettings = {
+								min,
+								max,
+								step: typeof s.step === "number" && s.step > 0 ? s.step : 1,
+								correctValue:
+									typeof s.correctValue === "number" &&
+									s.correctValue >= min &&
+									s.correctValue <= max
+										? s.correctValue
+										: Math.round((min + max) / 2),
+								tolerance: typeof s.tolerance === "number" && s.tolerance >= 0 ? s.tolerance : 0
+							};
+						} else if (safeType === "scale") {
+							const min = typeof s.min === "number" && !isNaN(s.min) ? s.min : 1;
+							const max =
+								typeof s.max === "number" && !isNaN(s.max) && s.max > min ? s.max : min + 9;
+							safeSettings = {
+								min,
+								max,
+								minLabel:
+									typeof s.minLabel === "string"
+										? (sanitizeValue(s.minLabel) as string).trim().substring(0, 50)
+										: "",
+								maxLabel:
+									typeof s.maxLabel === "string"
+										? (sanitizeValue(s.maxLabel) as string).trim().substring(0, 50)
+										: ""
+							};
+						}
+					}
+
 					questionsToInsert.push({
 						id: rawId,
 						quizId: quizId,
@@ -243,7 +281,8 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 						isMultiSelect: safeIsMultiSelect,
 						mediaUrl: safeMediaUrl,
 						mediaType: safeMediaType,
-						revealMode: safeRevealMode
+						revealMode: safeRevealMode,
+						settings: safeSettings
 					});
 
 					if (Array.isArray(q.options)) {
