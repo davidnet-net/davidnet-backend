@@ -1,26 +1,27 @@
 // src/websockets/quiz_edit.ts
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
-import * as Y from "yjs";
+import { getCookie } from "hono/cookie";
+import { verify } from "hono/jwt";
 import {
-	Awareness,
 	applyAwarenessUpdate,
+	Awareness,
 	encodeAwarenessUpdate,
 	removeAwarenessStates
 } from "y-protocols/awareness";
+import * as Y from "yjs";
+
 import { database } from "../../core/database/client";
 import {
-	quizzes,
-	quizCollaborators,
-	questions,
-	quizOptions,
 	type NewQuestion,
-	type NewQuizOption
+	type NewQuizOption,
+	questions,
+	quizCollaborators,
+	quizOptions,
+	quizzes
 } from "../../core/database/schema/quiz";
-import { eq, and } from "drizzle-orm";
 import { hasPermission } from "../../core/shared/checkPermissions";
-import { verify } from "hono/jwt";
-import { getCookie } from "hono/cookie";
 import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
 
 const OWN_QUIZ_IMAGE_URL_PREFIX = "https://davidnet-backend.davidnet.net/quiz-media/";
