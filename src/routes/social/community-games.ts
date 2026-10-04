@@ -1969,7 +1969,11 @@ communityGamesRoute.get("/:id/file/*", async (c) => {
 				// data - the SDK bridge (postMessage) is unaffected by this, it's not a "connection".
 				// 'self' (not 'none') because some game engines (Unity/Godot WebGL exports, etc.) load
 				// their own bundled .data/.wasm files via fetch from the same origin that served them.
-				"connect-src 'self';"
+				"connect-src 'self'; " +
+				// Without this, frame-src also falls back to the permissive default-src above, so
+				// uploaded game code could embed third-party iframes (ad/tracker overlays,
+				// clickjacking, phishing). No legitimate HTML5 game needs to nest an iframe.
+				"frame-src 'none';"
 		);
 
 		return c.body(s3Object.Body.transformToWebStream());
