@@ -267,6 +267,13 @@
       "when": 1791115205576,
       "tag": "0037_charming_sinister_six",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1791131168346,
+      "tag": "0038_bent_vengeance",
+      "breakpoints": true
     }
   ]
 }

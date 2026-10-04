@@ -1,5 +1,5 @@
 import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
-import { boolean, integer, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { authSchema, users } from "./auth";
 import { teams, workspaces } from "./workspaces";
 
@@ -83,7 +83,8 @@ export const questions = authSchema.table("questions", {
 	position: integer("position").notNull(),
 	timeLimit: integer("time_limit").default(20).notNull(), // Countdown in seconds
 	pointsMultiplier: integer("points_multiplier").default(1).notNull(), // 1x for scored quizzes, 0 for polls
-	isMultiSelect: boolean("is_multi_select").default(false).notNull() // <--- Added isMultiSelect
+	isMultiSelect: boolean("is_multi_select").default(false).notNull(), // <--- Added isMultiSelect
+	settings: jsonb("settings") // Type-specific config (slider min/max/step/correctValue, scale min/max/labels, ...)
 });
 
 export const quizOptions = authSchema.table("quiz_options", {
