@@ -2,7 +2,8 @@ import {
 	S3Client,
 	PutObjectCommand,
 	GetObjectCommand,
-	ListObjectsV2Command
+	ListObjectsV2Command,
+	DeleteObjectsCommand
 } from "@aws-sdk/client-s3";
 
 export const s3 = new S3Client({
@@ -41,6 +42,21 @@ export async function getFromBucket(bucket: string, key: string) {
 		})
 	);
 	return response;
+}
+
+export async function deleteFromBucket(bucket: string, keys: string[]) {
+	if (keys.length === 0) return;
+
+	// DeleteObjectsCommand caps out at 1000 keys per request.
+	for (let i = 0; i < keys.length; i += 1000) {
+		const batch = keys.slice(i, i + 1000);
+		await s3.send(
+			new DeleteObjectsCommand({
+				Bucket: bucket,
+				Delete: { Objects: batch.map((Key) => ({ Key })) }
+			})
+		);
+	}
 }
 
 export async function listBucketObjects(bucket: string, prefix: string): Promise<string[]> {
