@@ -29,6 +29,15 @@ export const requestStatusEnum = authSchema.enum("request_status", [
 	"declined"
 ]);
 
+export const mediaTypeEnum = authSchema.enum("media_type", ["image", "youtube"]);
+
+export const revealModeEnum = authSchema.enum("reveal_mode", [
+	"instant",
+	"fade",
+	"blur",
+	"slide"
+]);
+
 // --- TABLES ---
 export const quizzes = authSchema.table("quizzes", {
 	id: uuid("id")
@@ -68,6 +77,8 @@ export const questions = authSchema.table("questions", {
 		.references(() => quizzes.id, { onDelete: "cascade" }),
 	text: text("text").notNull(),
 	mediaUrl: text("media_url"),
+	mediaType: mediaTypeEnum("media_type"),
+	revealMode: revealModeEnum("reveal_mode").default("instant").notNull(),
 	type: questionTypeEnum("type").default("quiz").notNull(),
 	position: integer("position").notNull(),
 	timeLimit: integer("time_limit").default(20).notNull(), // Countdown in seconds

@@ -260,6 +260,13 @@
       "when": 1791056033562,
       "tag": "0036_modern_red_wolf",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1791115205576,
+      "tag": "0037_charming_sinister_six",
+      "breakpoints": true
     }
   ]
 }

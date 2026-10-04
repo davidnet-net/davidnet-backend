@@ -19,8 +19,12 @@ import { createRateLimiter } from "../../../../middlewares/rateLimiter";
 import { requirePerm } from "../../../../middlewares/requirePerm";
 import type { Env } from "../../../../middlewares/requireAuth";
 import { hasPermission } from "../../../../core/shared/checkPermissions";
+import { uploadToBucket } from "../../../../core/shared/s3";
 
 export const quiz = new Hono<Env>();
+
+const QUIZ_IMAGES_BUCKET = "quiz-images";
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Helper to normalize user IDs (handles UUID hyphens, casing, and whitespace)
 const normalizeId = (id: string | number | undefined | null): string => {
@@ -332,6 +336,74 @@ quiz.patch(
 		} catch (error) {
 			console.error("[Quiz API] Failed to update quiz:", error);
 			return c.json({ success: false, code: "INTERNAL_SERVER_ERROR" }, 500);
+		}
+	}
+);
+
+// --- UPLOAD A QUESTION IMAGE ---
+quiz.put(
+	"/:quizId/questions/:questionId/image",
+	requirePerm("quiz:manage"),
+	async (c) => {
+		const workspaceId = c.req.param("workspaceId");
+		const teamId = c.req.param("teamId");
+		const quizId = c.req.param("quizId");
+		const questionId = c.req.param("questionId");
+
+		if (!workspaceId || !quizId || !questionId || !UUID_REGEX.test(questionId)) {
+			return c.json({ success: false, code: "BAD_REQUEST" }, 400);
+		}
+
+		try {
+			const [targetQuiz] = await database
+				.select({ id: quizzes.id })
+				.from(quizzes)
+				.where(
+					and(
+						eq(quizzes.id, quizId),
+						eq(quizzes.workspaceId, workspaceId),
+						teamId ? eq(quizzes.teamId, teamId) : isNull(quizzes.teamId)
+					)
+				)
+				.limit(1);
+
+			if (!targetQuiz) {
+				return c.json({ success: false, code: "QUIZ_NOT_FOUND" }, 404);
+			}
+
+			const body = await c.req.parseBody();
+			const file = body["image"];
+
+			if (!file || !(file instanceof File)) {
+				return c.json({ success: false, code: "MISSING_IMAGE_FILE" }, 400);
+			}
+
+			const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/avif", "image/gif"];
+			if (!allowedTypes.includes(file.type)) {
+				return c.json({ success: false, code: "INVALID_FILE_TYPE" }, 400);
+			}
+
+			if (file.size > 5 * 1024 * 1024) {
+				return c.json({ success: false, code: "FILE_TOO_LARGE" }, 400);
+			}
+
+			const fileExt = file.type.split("/")[1] || "jpg";
+			const fileName = `${questionId}.${fileExt}`;
+			const buffer = Buffer.from(await file.arrayBuffer());
+
+			await uploadToBucket(QUIZ_IMAGES_BUCKET, `${quizId}/${fileName}`, buffer, file.type);
+
+			const versionToken = Math.random().toString(36).substring(2, 7);
+			const fullUrl = `https://davidnet-backend.davidnet.net/quiz-media/${quizId}/${fileName}?v=${versionToken}`;
+
+			return c.json({
+				success: true,
+				code: "QUESTION_IMAGE_UPLOADED",
+				url: fullUrl
+			});
+		} catch (error) {
+			console.error("[Quiz API] Failed to upload question image:", error);
+			return c.json({ success: false, code: "UPLOAD_FAILED" }, 500);
 		}
 	}
 );

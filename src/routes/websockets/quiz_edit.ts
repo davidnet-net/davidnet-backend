@@ -23,6 +23,30 @@ import { verify } from "hono/jwt";
 import { getCookie } from "hono/cookie";
 import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
 
+const OWN_QUIZ_IMAGE_URL_PREFIX = "https://davidnet-backend.davidnet.net/quiz-media/";
+
+// Accepts a youtube.com/watch?v= or youtu.be/ URL, or a bare 11-char video ID.
+function extractYoutubeId(input: string): string | null {
+	const trimmed = input.trim();
+	const idPattern = /^[A-Za-z0-9_-]{11}$/;
+	if (idPattern.test(trimmed)) return trimmed;
+
+	try {
+		const url = new URL(trimmed);
+		if (url.hostname === "youtu.be") {
+			const id = url.pathname.slice(1);
+			return idPattern.test(id) ? id : null;
+		}
+		if (url.hostname.endsWith("youtube.com")) {
+			const id = url.searchParams.get("v");
+			return id && idPattern.test(id) ? id : null;
+		}
+	} catch {
+		return null;
+	}
+	return null;
+}
+
 const quizRooms = new Map<string, Y.Doc>();
 const roomClients = new Map<string, Set<any>>();
 const saveTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
@@ -187,6 +211,27 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 							: 1;
 					const safeIsMultiSelect = typeof q.isMultiSelect === "boolean" ? q.isMultiSelect : false;
 
+					let safeMediaType: "image" | "youtube" | null = null;
+					let safeMediaUrl: string | null = null;
+					if (q.mediaType === "image" && typeof q.mediaUrl === "string") {
+						const trimmedUrl = q.mediaUrl.trim();
+						if (trimmedUrl.startsWith(OWN_QUIZ_IMAGE_URL_PREFIX)) {
+							safeMediaType = "image";
+							safeMediaUrl = trimmedUrl.substring(0, 2048);
+						}
+					} else if (q.mediaType === "youtube" && typeof q.mediaUrl === "string") {
+						if (extractYoutubeId(q.mediaUrl)) {
+							safeMediaType = "youtube";
+							safeMediaUrl = q.mediaUrl.trim().substring(0, 2048);
+						}
+					}
+
+					const VALID_REVEAL_MODES = new Set(["instant", "fade", "blur", "slide"]);
+					const safeRevealMode =
+						typeof q.revealMode === "string" && VALID_REVEAL_MODES.has(q.revealMode)
+							? (q.revealMode as NewQuestion["revealMode"])
+							: "instant";
+
 					questionsToInsert.push({
 						id: rawId,
 						quizId: quizId,
@@ -195,7 +240,10 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 						position: index,
 						timeLimit: safeTimeLimit,
 						pointsMultiplier: safeMultiplier,
-						isMultiSelect: safeIsMultiSelect
+						isMultiSelect: safeIsMultiSelect,
+						mediaUrl: safeMediaUrl,
+						mediaType: safeMediaType,
+						revealMode: safeRevealMode
 					});
 
 					if (Array.isArray(q.options)) {

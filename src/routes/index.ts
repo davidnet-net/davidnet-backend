@@ -9,6 +9,7 @@ import { workspaces } from "./workspaces/workspaces";
 import { support } from "./support/support";
 import { websockets } from "./websockets/websockets";
 import { legalRoute } from "./legal/legal";
+import { quizMedia } from "./quizMedia";
 
 export async function registerRoutes(app: Hono) {
 	app.route("/health", health);
@@ -19,6 +20,7 @@ export async function registerRoutes(app: Hono) {
 	app.route("/oidc", oidc);
 	app.route("/websockets", websockets);
 	app.route("/legal", legalRoute);
+	app.route("/quiz-media", quizMedia);
 
 	app.get("/.well-known/openid-configuration", (c) => {
 		const issuer = "https://davidnet-backend.davidnet.net";

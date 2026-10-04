@@ -43,14 +43,13 @@ services:
     restart: unless-stopped
 
   # One-shot bootstrap: creates the dev access key + the buckets the backend expects
-  # (profile-pictures, banner-pictures, shorts, communitygames), then exits. Re-running it
-  # (e.g. on every `docker compose up`) is safe — every step is idempotent.
+  # (profile-pictures, banner-pictures, shorts, communitygames, quiz-images), then exits.
+  # Re-running it (e.g. on every `docker compose up`) is safe — every step is idempotent.
+  # Image/entrypoint are defined in garage/Dockerfile (also published as
+  # ghcr.io/davidnet-net/garage-init for the cluster's equivalent sidecar).
   garage-init:
     build:
-      dockerfile_inline: |
-        FROM dxflrs/garage:v2.3.0 AS garage
-        FROM alpine:3.20
-        COPY --from=garage /garage /usr/local/bin/garage
+      context: ./garage
     environment:
       GARAGE_CONFIG: /etc/garage.toml
       GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:-23d822e4b77e16c51349e7846950f3cb95cc9b4e8268bb0f9567c98735caddf4}
@@ -58,14 +57,12 @@ services:
       GARAGE_SECRET_KEY: ${GARAGE_SECRET_KEY:-devsecretkeydevsecretkeydevsecretkeydevsecretkey}
     volumes:
       - ./garage/garage.toml:/etc/garage.toml:ro
-      - ./garage/init.sh:/init.sh:ro
       # Needs access to Garage's own metadata dir to authenticate as a CLI peer of the node
       # (same reason `kubectl exec ... -- /garage` only works run from inside the Garage pod).
       - ./volumes/garage:/data
     network_mode: "service:garage"
     depends_on:
       - garage
-    entrypoint: ["/bin/sh", "/init.sh"]
     restart: "no"
 
 volumes:
