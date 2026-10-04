@@ -579,7 +579,7 @@ async function triggerQuestionPhase(quizId: string, sessionId: string, questionI
 		opt.color = slotColors[idx] ?? opt.color;
 	});
 
-	const presenterPayload = { question: targetQ, options: shuffledOptions };
+	const presenterPayload = { question: targetQ, options: shuffledOptions, correctOrder };
 
 	// type_answer options ARE the accepted answers, so they must never reach the player.
 	// Puzzle options drop their original `position` (the correct-order answer) and are
@@ -626,7 +626,6 @@ async function triggerQuestionPhase(quizId: string, sessionId: string, questionI
 		durationMs: previewDurationMs,
 		presenterPayload,
 		playerPayload,
-		correctOrder,
 		responses: new Map<string, any>(),
 		resultsBreakdown: {},
 		leaderboard: []

@@ -561,7 +561,7 @@ playWs.get(
 							qType,
 							data,
 							activeSession.presenterPayload,
-							activeSession.correctOrder || null,
+							activeSession.presenterPayload.correctOrder || null,
 							responseTimeMs,
 							timeLimitMs,
 							multiplier
