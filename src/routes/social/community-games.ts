@@ -1609,7 +1609,13 @@ communityGamesRoute.get("/:id/file/*", async (c) => {
 				"media-src * https: http: data: blob:; " +
 				"font-src * https: http: data:; " +
 				"style-src * https: http: 'unsafe-inline'; " +
-				"script-src * https: http: 'unsafe-inline' 'unsafe-eval';"
+				"script-src * https: http: 'unsafe-inline' 'unsafe-eval'; " +
+				// Without this, connect-src falls back to the permissive default-src above, meaning a
+				// game's own JS could fetch()/XHR/WebSocket to ANY third-party origin and exfiltrate
+				// data - the SDK bridge (postMessage) is unaffected by this, it's not a "connection".
+				// 'self' (not 'none') because some game engines (Unity/Godot WebGL exports, etc.) load
+				// their own bundled .data/.wasm files via fetch from the same origin that served them.
+				"connect-src 'self';"
 		);
 
 		return c.body(s3Object.Body.transformToWebStream());
