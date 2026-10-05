@@ -31,6 +31,18 @@ const MAX_HIGHSCORE_VALUE = 100_000_000;
 const ALLOWED_ICON_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"];
 const MAX_ICON_SIZE_BYTES = 2 * 1024 * 1024; // 2MB
 
+// --- GAME ZIP UPLOAD: SAFETY LIMITS ---
+// adm-zip (0.6.1+) already caps a single entry's decompression output at that entry's own
+// declared uncompressed size, which blocks the classic "lies about its size" zip-bomb CVE class.
+// It does NOT stop an entry that *honestly* declares a huge uncompressed size (trivially achieved
+// with a small amount of highly-repetitive data) or a zip with a huge number of entries - both of
+// those are plain resource-exhaustion, so they're bounded explicitly here before anything is
+// decompressed or uploaded.
+const MAX_GAME_ZIP_SIZE_BYTES = 150 * 1024 * 1024; // 150MB - the uploaded .zip itself, compressed
+const MAX_UNCOMPRESSED_ENTRY_SIZE_BYTES = 200 * 1024 * 1024; // 200MB - any single file inside it
+const MAX_TOTAL_UNCOMPRESSED_SIZE_BYTES = 500 * 1024 * 1024; // 500MB - sum of all files inside it
+const MAX_GAME_ZIP_ENTRY_COUNT = 2000; // files + directories combined
+
 // --- ANTI-CHEAT: per-session signed highscore submissions ---
 const SESSION_DURATION_MS = 6 * 60 * 60 * 1000; // 6 hours
 const SESSION_TIMESTAMP_SKEW_MS = 2 * 60 * 1000; // 2 minutes
@@ -107,6 +119,69 @@ async function canManageGame(gameId: string, userId: string): Promise<boolean> {
 	if (game.userId === userId) return true;
 
 	return await isModerator(userId);
+}
+
+// --- HELPER: VALIDATE AN UPLOADED GAME ZIP BEFORE TOUCHING STORAGE ---
+// Reads only the zip's central-directory metadata (entry count, names, declared sizes) - none of
+// this decompresses anything, so it's cheap to run as a precheck before the real upload/update
+// work (which does decompress each entry via entry.getData()).
+type ZipValidationResult =
+	| { success: true }
+	| { success: false; code: string; message: string };
+
+function validateGameZip(zip: AdmZip): ZipValidationResult {
+	const entries = zip.getEntries();
+
+	if (entries.length > MAX_GAME_ZIP_ENTRY_COUNT) {
+		return {
+			success: false,
+			code: "TOO_MANY_FILES",
+			message: `ZIP contains too many files (max ${MAX_GAME_ZIP_ENTRY_COUNT}).`
+		};
+	}
+
+	let totalUncompressedSize = 0;
+
+	for (const entry of entries) {
+		if (entry.isDirectory) continue;
+
+		// adm-zip normalizes entryName to forward slashes, but never strips ".." segments or a
+		// leading slash - reject those outright rather than letting attacker-controlled path
+		// segments reach an S3 key unchecked.
+		if (
+			entry.entryName.startsWith("/") ||
+			entry.entryName.startsWith("\\") ||
+			entry.entryName.split(/[/\\]/).includes("..")
+		) {
+			return {
+				success: false,
+				code: "UNSAFE_ENTRY_NAME",
+				message: `Unsafe file path in ZIP: ${entry.entryName}`
+			};
+		}
+
+		const declaredSize = entry.header.size;
+
+		if (declaredSize > MAX_UNCOMPRESSED_ENTRY_SIZE_BYTES) {
+			return {
+				success: false,
+				code: "FILE_TOO_LARGE",
+				message: `File too large in ZIP: ${entry.entryName}`
+			};
+		}
+
+		totalUncompressedSize += declaredSize;
+
+		if (totalUncompressedSize > MAX_TOTAL_UNCOMPRESSED_SIZE_BYTES) {
+			return {
+				success: false,
+				code: "ZIP_TOO_LARGE_UNCOMPRESSED",
+				message: "ZIP's uncompressed contents are too large."
+			};
+		}
+	}
+
+	return { success: true };
 }
 
 // --- HELPER: WRITE A CREATOR AUDIT LOG ENTRY ---
@@ -248,6 +323,10 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 		);
 	}
 
+	if (file.size > MAX_GAME_ZIP_SIZE_BYTES) {
+		return c.json({ success: false, code: "ZIP_TOO_LARGE" }, 400);
+	}
+
 	// Icon is optional - if the creator doesn't upload one, the frontend falls back to a default icon.
 	let iconFilename: string | null = null;
 	if (iconFile !== undefined) {
@@ -267,6 +346,17 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 	}
 
 	try {
+		const buffer = Buffer.from(await file.arrayBuffer());
+		const zip = new AdmZip(buffer);
+
+		const zipValidation = validateGameZip(zip);
+		if (!zipValidation.success) {
+			return c.json(
+				{ success: false, code: zipValidation.code, message: zipValidation.message },
+				400
+			);
+		}
+
 		const [newGame] = await database
 			.insert(communityGame)
 			.values({
@@ -281,8 +371,6 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 
 		const gameId = newGame.id;
 
-		const buffer = Buffer.from(await file.arrayBuffer());
-		const zip = new AdmZip(buffer);
 		const zipEntries = zip.getEntries();
 
 		let hasIndexHtml = false;
@@ -647,9 +735,13 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
 		);
 	}
 
+	if (file.size > MAX_GAME_ZIP_SIZE_BYTES) {
+		return c.json({ success: false, code: "ZIP_TOO_LARGE" }, 400);
+	}
+
 	try {
-		// Validate the zip has an index.html BEFORE deleting any existing files, so a bad upload
-		// can't take down an already-working game.
+		// Validate the zip BEFORE deleting any existing files, so a bad upload can't take down an
+		// already-working game.
 		const precheckZip = new AdmZip(Buffer.from(await file.arrayBuffer()));
 		const hasIndexHtmlEntry = precheckZip
 			.getEntries()
@@ -666,6 +758,14 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
 			);
 		}
 
+		const zipValidation = validateGameZip(precheckZip);
+		if (!zipValidation.success) {
+			return c.json(
+				{ success: false, code: zipValidation.code, message: zipValidation.message },
+				400
+			);
+		}
+
 		// Remove the previous version's files (except the icon, which is managed separately) so
 		// stale files the new zip doesn't include don't linger and stay servable.
 		const existingKeys = await listBucketObjects("communitygames", `${gameId}/`);
@@ -675,8 +775,8 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
 			existingKeys.filter((key) => key !== iconKey)
 		);
 
-		const buffer = Buffer.from(await file.arrayBuffer());
-		const zip = new AdmZip(buffer);
+		// Already fully parsed above (and validated) - no need to re-read the file or re-parse it.
+		const zip = precheckZip;
 		const zipEntries = zip.getEntries();
 
 		let hasIndexHtml = false;
