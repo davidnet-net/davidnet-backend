@@ -14,6 +14,26 @@ import { userConnections, userBlocks } from "../../core/database/schema/connecti
 
 export const connections = new Hono<Env>();
 
+// Every endpoint below is called with whatever identifier the profile page it's on has handy -
+// which, per the site-wide profile link convention (https://account.davidnet.net/profile/
+// {username}), is a username, not a userId - even though the field/param is historically named
+// "requestedUserID"/"user". Comparing that directly against the uuid-typed sender_id/receiver_id
+// columns throws a Postgres type error, so every handler resolves it first (same pattern as
+// auth/profile.ts's "user" query param).
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function resolveUserId(identifier: string): Promise<string | null> {
+	if (UUID_REGEX.test(identifier)) return identifier;
+
+	const [user] = await database
+		.select({ userId: users.userId })
+		.from(users)
+		.where(eq(users.username, identifier))
+		.limit(1);
+
+	return user?.userId ?? null;
+}
+
 connections.get("/", requireAuth, async (c) => {
 	const userID = c.get("user").id;
 
@@ -102,9 +122,9 @@ connections.get("/", requireAuth, async (c) => {
 
 connections.get("/status", requireAuth, async (c) => {
 	const userID = c.get("user").id;
-	const requestedUserID = c.req.query("user");
+	const rawRequestedUserID = c.req.query("user");
 
-	if (!requestedUserID) {
+	if (!rawRequestedUserID) {
 		return c.json(
 			{
 				code: "NO_USER_GIVEN",
@@ -112,6 +132,11 @@ connections.get("/status", requireAuth, async (c) => {
 			},
 			400
 		);
+	}
+
+	const requestedUserID = await resolveUserId(rawRequestedUserID);
+	if (!requestedUserID) {
+		return c.json({ code: "USER_NOT_FOUND", success: false }, 404);
 	}
 
 	if (userID === requestedUserID) {
@@ -160,7 +185,12 @@ connections.post(
 	sValidator("json", requestedUserSchema),
 	async (c) => {
 		const userID = c.get("user").id;
-		const { requestedUserID } = c.req.valid("json");
+		const { requestedUserID: rawRequestedUserID } = c.req.valid("json");
+
+		const requestedUserID = await resolveUserId(rawRequestedUserID);
+		if (!requestedUserID) {
+			return c.json({ code: "USER_NOT_FOUND", success: false }, 404);
+		}
 
 		if (userID === requestedUserID) {
 			return c.json(
@@ -245,7 +275,12 @@ connections.post(
 	sValidator("json", requestedUserSchema),
 	async (c) => {
 		const userID = c.get("user").id;
-		const { requestedUserID } = c.req.valid("json");
+		const { requestedUserID: rawRequestedUserID } = c.req.valid("json");
+
+		const requestedUserID = await resolveUserId(rawRequestedUserID);
+		if (!requestedUserID) {
+			return c.json({ code: "USER_NOT_FOUND", success: false }, 404);
+		}
 
 		const result = await database
 			.update(userConnections)
@@ -280,7 +315,12 @@ connections.post(
 	sValidator("json", requestedUserSchema),
 	async (c) => {
 		const userID = c.get("user").id;
-		const { requestedUserID } = c.req.valid("json");
+		const { requestedUserID: rawRequestedUserID } = c.req.valid("json");
+
+		const requestedUserID = await resolveUserId(rawRequestedUserID);
+		if (!requestedUserID) {
+			return c.json({ code: "USER_NOT_FOUND", success: false }, 404);
+		}
 
 		const result = await database
 			.update(userConnections)
@@ -316,7 +356,12 @@ connections.post(
 	sValidator("json", requestedUserSchema),
 	async (c) => {
 		const userID = c.get("user").id;
-		const { requestedUserID } = c.req.valid("json");
+		const { requestedUserID: rawRequestedUserID } = c.req.valid("json");
+
+		const requestedUserID = await resolveUserId(rawRequestedUserID);
+		if (!requestedUserID) {
+			return c.json({ code: "USER_NOT_FOUND", success: false }, 404);
+		}
 
 		const result = await database
 			.delete(userConnections)
@@ -348,7 +393,12 @@ connections.post(
 
 connections.post("/block", requireAuth, sValidator("json", requestedUserSchema), async (c) => {
 	const userID = c.get("user").id;
-	const { requestedUserID } = c.req.valid("json");
+	const { requestedUserID: rawRequestedUserID } = c.req.valid("json");
+
+	const requestedUserID = await resolveUserId(rawRequestedUserID);
+	if (!requestedUserID) {
+		return c.json({ code: "USER_NOT_FOUND", success: false }, 404);
+	}
 
 	if (userID === requestedUserID) {
 		return c.json(
@@ -379,7 +429,12 @@ connections.post("/block", requireAuth, sValidator("json", requestedUserSchema),
 
 connections.post("/unblock", requireAuth, sValidator("json", requestedUserSchema), async (c) => {
 	const userID = c.get("user").id;
-	const { requestedUserID } = c.req.valid("json");
+	const { requestedUserID: rawRequestedUserID } = c.req.valid("json");
+
+	const requestedUserID = await resolveUserId(rawRequestedUserID);
+	if (!requestedUserID) {
+		return c.json({ code: "USER_NOT_FOUND", success: false }, 404);
+	}
 
 	await database
 		.delete(userBlocks)
