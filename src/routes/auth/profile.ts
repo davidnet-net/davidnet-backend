@@ -71,11 +71,14 @@ profile.get("/", collectAuth, async (c) => {
 			languageVisibility: userPrivacyPreferences.languageVisibility,
 			timezoneVisibility: userPrivacyPreferences.timezoneVisibility,
 			locationVisibility: userPrivacyPreferences.locationVisibility,
-			emailVisibility: userPrivacyPreferences.emailVisibility
+			emailVisibility: userPrivacyPreferences.emailVisibility,
+
+			isInternal: internalAccess.internalAccess
 		})
 		.from(users)
 		.leftJoin(userPreferences, eq(users.userId, userPreferences.userId))
 		.leftJoin(userPrivacyPreferences, eq(users.userId, userPrivacyPreferences.userId))
+		.leftJoin(internalAccess, eq(users.userId, internalAccess.userId))
 		.where(whereCondition)
 		.limit(1);
 
@@ -119,7 +122,8 @@ profile.get("/", collectAuth, async (c) => {
 		language: canView(targetUser.languageVisibility) ? targetUser.language : undefined,
 		timezone: canView(targetUser.timezoneVisibility) ? targetUser.timezone : undefined,
 		email: canView(targetUser.emailVisibility) ? targetUser.email : undefined,
-		connectionsCount: acceptedConnectionsCount
+		connectionsCount: acceptedConnectionsCount,
+		isInternal: Boolean(targetUser.isInternal)
 	};
 
 	return c.json({ success: true, code: "SUCCESS", profileResponse });
