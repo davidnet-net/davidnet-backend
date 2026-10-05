@@ -560,8 +560,20 @@ moderationRoute.get("/violations/all", requireAuth, async (c) => {
 
 	try {
 		const allViolations = await database
-			.select()
+			.select({
+				id: violations.id,
+				userId: violations.userId,
+				username: users.username,
+				displayName: users.displayName,
+				avatarUrl: users.avatarUrl,
+				reportedType: violations.reportedType,
+				reportedId: violations.reportedId,
+				reason: violations.reason,
+				moderatorReason: violations.moderatorReason,
+				createdAt: violations.createdAt
+			})
 			.from(violations)
+			.innerJoin(users, eq(violations.userId, users.userId))
 			.orderBy(desc(violations.createdAt));
 
 		return c.json({
@@ -586,8 +598,17 @@ moderationRoute.get("/bans/all", requireAuth, async (c) => {
 	try {
 		const now = new Date();
 		const activeBans = await database
-			.select()
+			.select({
+				userId: accountModerationStatus.userId,
+				username: users.username,
+				displayName: users.displayName,
+				avatarUrl: users.avatarUrl,
+				reportTrustScore: accountModerationStatus.reportTrustScore,
+				bannedUntil: accountModerationStatus.bannedUntil,
+				updatedAt: accountModerationStatus.updatedAt
+			})
 			.from(accountModerationStatus)
+			.innerJoin(users, eq(accountModerationStatus.userId, users.userId))
 			.where(gt(accountModerationStatus.bannedUntil, now))
 			.orderBy(desc(accountModerationStatus.updatedAt));
 
@@ -598,6 +619,96 @@ moderationRoute.get("/bans/all", requireAuth, async (c) => {
 		});
 	} catch (error) {
 		console.error("Failed to fetch active platform bans:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 13. GET ALL SHORTS (CHRONOLOGICAL, MODERATOR BROWSER) ---
+moderationRoute.get("/shorts/all", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 200);
+	const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+
+	try {
+		const allShorts = await database
+			.select({
+				id: shorts.id,
+				userId: shorts.userId,
+				username: users.username,
+				displayName: users.displayName,
+				avatarUrl: users.avatarUrl,
+				title: shorts.title,
+				videoUrl: shorts.videoUrl,
+				views: shorts.views,
+				likesCount: shorts.likesCount,
+				isModerated: shorts.isModerated,
+				createdAt: shorts.createdAt
+			})
+			.from(shorts)
+			.innerJoin(users, eq(shorts.userId, users.userId))
+			.orderBy(desc(shorts.createdAt))
+			.limit(limit)
+			.offset(offset);
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			shorts: allShorts,
+			hasMore: allShorts.length === limit
+		});
+	} catch (error) {
+		console.error("Failed to fetch all shorts:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 14. GET ALL ACCOUNTS (CHRONOLOGICAL, MODERATOR BROWSER) ---
+moderationRoute.get("/accounts/all", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 200);
+	const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+
+	try {
+		const allAccounts = await database
+			.select({
+				userId: users.userId,
+				username: users.username,
+				displayName: users.displayName,
+				avatarUrl: users.avatarUrl,
+				email: users.email,
+				countryCode: users.countryCode,
+				createdAt: users.createdAt,
+				bannedUntil: accountModerationStatus.bannedUntil,
+				reportTrustScore: accountModerationStatus.reportTrustScore,
+				internalAccess: internalAccess.internalAccess,
+				supportAccess: internalAccess.supportAccess,
+				developerAccess: internalAccess.developerAccess
+			})
+			.from(users)
+			.leftJoin(accountModerationStatus, eq(users.userId, accountModerationStatus.userId))
+			.leftJoin(internalAccess, eq(users.userId, internalAccess.userId))
+			.orderBy(desc(users.createdAt))
+			.limit(limit)
+			.offset(offset);
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			accounts: allAccounts,
+			hasMore: allAccounts.length === limit
+		});
+	} catch (error) {
+		console.error("Failed to fetch all accounts:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
 	}
 });

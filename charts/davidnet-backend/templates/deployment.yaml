@@ -111,3 +111,8 @@ spec:
                 secretKeyRef:
                   name: headscale-secret
                   key: HEADSCALE_CLIENT_SECRET
+            - name: DISCORD_ACTIVITY_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: discord-activity-webhook
+                  key: DISCORD_ACTIVITY_WEBHOOK_URL
