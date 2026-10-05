@@ -12,6 +12,7 @@ import {
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
 import { collectAuth } from "../../middlewares/collectAuth";
 import { uploadToBucket, getFromBucket } from "../../core/shared/s3";
+import { notifyActivity } from "../../core/shared/activityWebhook";
 import { userConnections } from "../../core/database/schema/connections";
 
 export const profile = new Hono<Env>();
@@ -243,6 +244,12 @@ profile.patch("/", requireAuth, async (c) => {
 		if (Object.keys(userUpdates).length > 0) {
 			userUpdates.updatedAt = new Date();
 			await database.update(users).set(userUpdates).where(eq(users.userId, userId));
+
+			void notifyActivity("✏️ Account updated", userId, {
+				"Changed fields": Object.keys(userUpdates)
+					.filter((key) => key !== "updatedAt")
+					.join(", ")
+			});
 		}
 
 		if (Object.keys(preferenceUpdates).length > 0) {

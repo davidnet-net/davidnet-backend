@@ -17,6 +17,7 @@ import {
 } from "../../core/database/schema/schema";
 import { deleteFromBucket,getFromBucket, listBucketObjects,uploadToBucket } from "../../core/shared/s3";
 import { type Env, requireAuth } from "../../middlewares/requireAuth";
+import { notifyActivity } from "../../core/shared/activityWebhook";
 
 export const communityGamesRoute = new Hono<Env>();
 
@@ -688,6 +689,11 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 			);
 		}
 
+		void notifyActivity("🎮 Community game created", userId, {
+			"Game ID": newGame.id,
+			Title: newGame.title
+		});
+
 		return c.json({ success: true, code: "GAME_UPLOADED", game: newGame });
 	} catch (error) {
 		console.error("Failed to upload community game:", error);
@@ -1090,6 +1096,10 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
 			.update(communityGame)
 			.set({ updatedAt: new Date() })
 			.where(eq(communityGame.id, gameId));
+
+		void notifyActivity("🎮 Community game updated", userId, {
+			"Game ID": gameId
+		});
 
 		return c.json({ success: true, code: "GAME_UPDATED" });
 	} catch (error) {

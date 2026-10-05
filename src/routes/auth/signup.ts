@@ -22,6 +22,7 @@ import {
 } from "../../core/requestSchemas/signup";
 import { createUserSession } from "../../core/shared/jwt";
 import { createUserAuditLog } from "../../core/shared/auditLogs";
+import { notifyActivity } from "../../core/shared/activityWebhook";
 import { sendSignupVerifyEmail } from "../../core/shared/signupVerifyEmail";
 import { isInvalidEmail } from "../../core/utils/emails";
 import { isValidSignupToken } from "../../core/utils/signupTokenValidator";
@@ -193,6 +194,10 @@ signup.post(
 		sendSignupVerifyEmail(signupStatusInsertion[0].emailVerificationToken, userInsertion[0].email);
 
 		await createUserAuditLog(userInsertion[0].userID, "Account created and legal terms accepted.");
+
+		void notifyActivity("🆕 Account created", userInsertion[0].userID, {
+			Username: username
+		});
 
 		return c.json(
 			{
