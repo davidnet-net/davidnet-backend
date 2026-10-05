@@ -116,3 +116,8 @@ spec:
                 secretKeyRef:
                   name: discord-activity-webhook
                   key: DISCORD_ACTIVITY_WEBHOOK_URL
+            - name: HEADSCALE_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: headscale-secret
+                  key: HEADSCALE_REDIRECT_URI
