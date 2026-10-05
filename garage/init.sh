@@ -4,14 +4,14 @@
 # with read/write access. Safe to run every time — every step here is idempotent.
 #
 # Env vars (all optional, default to the local-dev setup):
-#   GARAGE_BUCKETS        space-separated bucket list (default: today's local-dev set + quiz-images)
+#   GARAGE_BUCKETS        space-separated bucket list (default: today's local-dev set)
 #   GARAGE_INIT_KEY_NAME  name to register the key under (default: local-dev)
 #   GARAGE_INIT_KEEP_ALIVE  "true" to sleep forever after provisioning instead of exiting
 #                           (needed for a long-running cluster sidecar container; local dev's
 #                           one-shot container leaves this unset and exits normally)
 set -eu
 
-GARAGE_BUCKETS="${GARAGE_BUCKETS:-profile-pictures banner-pictures shorts communitygames quiz-images}"
+GARAGE_BUCKETS="${GARAGE_BUCKETS:-profile-pictures banner-pictures shorts communitygames quiz-images feedback}"
 GARAGE_INIT_KEY_NAME="${GARAGE_INIT_KEY_NAME:-local-dev}"
 
 echo "[garage-init] Waiting for Garage RPC to come up..."
