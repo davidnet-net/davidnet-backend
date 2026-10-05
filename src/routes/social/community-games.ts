@@ -7,11 +7,13 @@ import { database } from "../../core/database/client";
 import {
 	accountModerationStatus,
 	communityGame,
+	communityGameAchievements,
 	communityGameAuditLog,
 	communityGameHighscores,
 	communityGameLikes,
 	communityGameSaves,
 	communityGameSessions,
+	DEFAULT_LEADERBOARD_CATEGORY,
 	internalAccess,
 	users
 } from "../../core/database/schema/schema";
@@ -21,12 +23,36 @@ import { notifyActivity } from "../../core/shared/activityWebhook";
 
 export const communityGamesRoute = new Hono<Env>();
 
-// Max size (in characters of the JSON string) allowed for a single save blob.
-const MAX_SAVE_JSON_LENGTH = 200_000;
+// Max size (in characters of the JSON string) allowed for a single save blob. Raised from the
+// original 200kb to 1MB - old saves (all well under 200kb) are unaffected, this only loosens the
+// ceiling for new saves.
+const MAX_SAVE_JSON_LENGTH = 1_000_000;
 // Absolute sanity ceiling. Not per-game configurable on purpose: it's a last-resort backstop
 // against nonsense values (e.g. someone setting it to 30 billion); the anomaly flag below is what
 // actually adapts to what's reasonable for a specific game.
 const MAX_HIGHSCORE_VALUE = 100_000_000;
+
+// --- MULTIPLE LEADERBOARDS ---
+// A game can submit scores under any number of named categories (e.g. "time-attack", "level-3").
+// Omitting a category (every game uploaded before this feature existed, and any new game that
+// doesn't bother) falls back to DEFAULT_LEADERBOARD_CATEGORY, reproducing the old single-leaderboard
+// behavior exactly.
+const MAX_CATEGORY_LENGTH = 50;
+const CATEGORY_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+function sanitizeCategory(raw: unknown): string | null {
+	if (raw === undefined || raw === null || raw === "") return DEFAULT_LEADERBOARD_CATEGORY;
+	if (typeof raw !== "string") return null;
+	if (raw.length > MAX_CATEGORY_LENGTH || !CATEGORY_PATTERN.test(raw)) return null;
+	return raw;
+}
+
+// --- ACHIEVEMENTS ---
+const MAX_ACHIEVEMENT_ID_LENGTH = 100;
+const MAX_ACHIEVEMENT_NAME_LENGTH = 200;
+const MAX_ACHIEVEMENT_DESCRIPTION_LENGTH = 500;
+const MAX_ACHIEVEMENT_ICON_LENGTH = 32;
+const ACHIEVEMENT_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 // --- ICON UPLOAD ---
 const ALLOWED_ICON_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"];
@@ -519,15 +545,20 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
                             var sessionReady = call("startSession", {});
 
                             window.DavidnetSDK = {
-                                // Submit a score. Server keeps the best score per-player and globally.
+                                // Submit a score. Server keeps the best score per-player and globally, PER
+                                // CATEGORY - pass { category: "time-attack" } to use a leaderboard other than
+                                // the default one (omit it entirely and you get the one-leaderboard-per-game
+                                // behavior games have always had).
                                 // Resolves: { score, playerHighscore, globalHighscore, isNewPersonalBest, isNewGlobalBest }
-                                applyHighscore: function(score) {
+                                applyHighscore: function(score, options) {
+                                    var category = (options && options.category) || "default";
                                     return sessionReady.then(function(session) {
                                         var timestamp = Date.now();
                                         var message = session.sessionId + ":" + GAME_ID + ":" + score + ":" + timestamp;
                                         return signMessage(session.secret, message).then(function(signature) {
                                             return call("applyHighscore", {
                                                 score: score,
+                                                category: category,
                                                 sessionId: session.sessionId,
                                                 timestamp: timestamp,
                                                 signature: signature
@@ -535,11 +566,13 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
                                         });
                                     });
                                 },
+                                // Pass { category: "time-attack" } to read a non-default leaderboard.
                                 // Resolves: { playerHighscore, globalHighscore, leaderboard: [{ rank, username, displayName, avatarUrl, score }] (top 10) }
-                                getHighscores: function() {
-                                    return call("getHighscores", {});
+                                getHighscores: function(options) {
+                                    var category = (options && options.category) || "default";
+                                    return call("getHighscores", { category: category });
                                 },
-                                // Persist an arbitrary JSON-serializable save object (max ~200kb). Resolves: { savedAt }
+                                // Persist an arbitrary JSON-serializable save object (max ~1MB). Resolves: { savedAt }
                                 saveJsonBlob: function(data) {
                                     return sessionReady.then(function(session) {
                                         var serialized = JSON.stringify(data);
@@ -563,6 +596,46 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
                                 // Resolves: { data, updatedAt } — data is null if nothing was saved yet.
                                 getJsonBlob: function() {
                                     return call("getJsonBlob", {});
+                                },
+
+                                // Unlock an achievement for the current player. achievement is
+                                // { id, name, description?, icon? } - "id" is a stable string you choose
+                                // (unique within your game, not globally). First unlock wins: if this id was
+                                // already unlocked for this player, the stored name/description/icon don't
+                                // change. Safe to call every time the condition is met.
+                                // Resolves: { isNew, achievement: { id, name, description, icon, unlockedAt } }
+                                unlockAchievement: function(achievement) {
+                                    achievement = achievement || {};
+                                    var id = String(achievement.id || "");
+                                    var name = String(achievement.name || id);
+                                    var description = achievement.description != null ? String(achievement.description) : null;
+                                    var icon = achievement.icon != null ? String(achievement.icon) : null;
+                                    return sessionReady.then(function(session) {
+                                        var serialized = JSON.stringify({ id: id, name: name, description: description, icon: icon });
+                                        var timestamp = Date.now();
+                                        var enc = new TextEncoder();
+                                        return crypto.subtle.digest("SHA-256", enc.encode(serialized))
+                                            .then(hexFromBuffer)
+                                            .then(function(dataHash) {
+                                                var message = session.sessionId + ":" + GAME_ID + ":" + dataHash + ":" + timestamp;
+                                                return signMessage(session.secret, message).then(function(signature) {
+                                                    return call("unlockAchievement", {
+                                                        id: id,
+                                                        name: name,
+                                                        description: description,
+                                                        icon: icon,
+                                                        sessionId: session.sessionId,
+                                                        timestamp: timestamp,
+                                                        signature: signature
+                                                    });
+                                                });
+                                            });
+                                    });
+                                },
+                                // Resolves: { achievements: [{ id, name, description, icon, unlockedAt }] } —
+                                // every achievement this player has unlocked in THIS game.
+                                getAchievements: function() {
+                                    return call("getAchievements", {});
                                 },
 
                                 // Generic real-time extension: rooms (pub/sub channels with presence) plus a
@@ -930,15 +1003,20 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
                             var sessionReady = call("startSession", {});
 
                             window.DavidnetSDK = {
-                                // Submit a score. Server keeps the best score per-player and globally.
+                                // Submit a score. Server keeps the best score per-player and globally, PER
+                                // CATEGORY - pass { category: "time-attack" } to use a leaderboard other than
+                                // the default one (omit it entirely and you get the one-leaderboard-per-game
+                                // behavior games have always had).
                                 // Resolves: { score, playerHighscore, globalHighscore, isNewPersonalBest, isNewGlobalBest }
-                                applyHighscore: function(score) {
+                                applyHighscore: function(score, options) {
+                                    var category = (options && options.category) || "default";
                                     return sessionReady.then(function(session) {
                                         var timestamp = Date.now();
                                         var message = session.sessionId + ":" + GAME_ID + ":" + score + ":" + timestamp;
                                         return signMessage(session.secret, message).then(function(signature) {
                                             return call("applyHighscore", {
                                                 score: score,
+                                                category: category,
                                                 sessionId: session.sessionId,
                                                 timestamp: timestamp,
                                                 signature: signature
@@ -946,11 +1024,13 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
                                         });
                                     });
                                 },
+                                // Pass { category: "time-attack" } to read a non-default leaderboard.
                                 // Resolves: { playerHighscore, globalHighscore, leaderboard: [{ rank, username, displayName, avatarUrl, score }] (top 10) }
-                                getHighscores: function() {
-                                    return call("getHighscores", {});
+                                getHighscores: function(options) {
+                                    var category = (options && options.category) || "default";
+                                    return call("getHighscores", { category: category });
                                 },
-                                // Persist an arbitrary JSON-serializable save object (max ~200kb). Resolves: { savedAt }
+                                // Persist an arbitrary JSON-serializable save object (max ~1MB). Resolves: { savedAt }
                                 saveJsonBlob: function(data) {
                                     return sessionReady.then(function(session) {
                                         var serialized = JSON.stringify(data);
@@ -974,6 +1054,46 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
                                 // Resolves: { data, updatedAt } — data is null if nothing was saved yet.
                                 getJsonBlob: function() {
                                     return call("getJsonBlob", {});
+                                },
+
+                                // Unlock an achievement for the current player. achievement is
+                                // { id, name, description?, icon? } - "id" is a stable string you choose
+                                // (unique within your game, not globally). First unlock wins: if this id was
+                                // already unlocked for this player, the stored name/description/icon don't
+                                // change. Safe to call every time the condition is met.
+                                // Resolves: { isNew, achievement: { id, name, description, icon, unlockedAt } }
+                                unlockAchievement: function(achievement) {
+                                    achievement = achievement || {};
+                                    var id = String(achievement.id || "");
+                                    var name = String(achievement.name || id);
+                                    var description = achievement.description != null ? String(achievement.description) : null;
+                                    var icon = achievement.icon != null ? String(achievement.icon) : null;
+                                    return sessionReady.then(function(session) {
+                                        var serialized = JSON.stringify({ id: id, name: name, description: description, icon: icon });
+                                        var timestamp = Date.now();
+                                        var enc = new TextEncoder();
+                                        return crypto.subtle.digest("SHA-256", enc.encode(serialized))
+                                            .then(hexFromBuffer)
+                                            .then(function(dataHash) {
+                                                var message = session.sessionId + ":" + GAME_ID + ":" + dataHash + ":" + timestamp;
+                                                return signMessage(session.secret, message).then(function(signature) {
+                                                    return call("unlockAchievement", {
+                                                        id: id,
+                                                        name: name,
+                                                        description: description,
+                                                        icon: icon,
+                                                        sessionId: session.sessionId,
+                                                        timestamp: timestamp,
+                                                        signature: signature
+                                                    });
+                                                });
+                                            });
+                                    });
+                                },
+                                // Resolves: { achievements: [{ id, name, description, icon, unlockedAt }] } —
+                                // every achievement this player has unlocked in THIS game.
+                                getAchievements: function() {
+                                    return call("getAchievements", {});
                                 },
 
                                 // Generic real-time extension: rooms (pub/sub channels with presence) plus a
@@ -1167,6 +1287,34 @@ communityGamesRoute.get("/audit-log/mine", requireAuth, async (c) => {
 		return c.json({ success: true, code: "SUCCESS", entries });
 	} catch (error) {
 		console.error("Failed to fetch audit log:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 2C. GET MY ACHIEVEMENTS ACROSS ALL COMMUNITY GAMES ---
+communityGamesRoute.get("/achievements/mine", requireAuth, async (c) => {
+	const userId = c.get("user").id;
+
+	try {
+		const achievements = await database
+			.select({
+				gameId: communityGameAchievements.gameId,
+				gameTitle: communityGame.title,
+				gameIconFilename: communityGame.iconFilename,
+				achievementId: communityGameAchievements.achievementId,
+				name: communityGameAchievements.name,
+				description: communityGameAchievements.description,
+				icon: communityGameAchievements.icon,
+				unlockedAt: communityGameAchievements.unlockedAt
+			})
+			.from(communityGameAchievements)
+			.innerJoin(communityGame, eq(communityGameAchievements.gameId, communityGame.id))
+			.where(eq(communityGameAchievements.userId, userId))
+			.orderBy(desc(communityGameAchievements.unlockedAt));
+
+		return c.json({ success: true, code: "SUCCESS", achievements });
+	} catch (error) {
+		console.error("Failed to fetch achievements:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
 	}
 });
@@ -1434,6 +1582,15 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 		return c.json({ success: false, code: "INVALID_SCORE" }, 400);
 	}
 
+	// Not part of the signed payload (see sanitizeCategory's definition) - it's just a label used to
+	// bucket scores into separate leaderboards, with no stronger anti-cheat requirement than the
+	// score itself already has. Keeping it out of the signature means old, already-uploaded games
+	// (whose injected script never sends a category) keep verifying exactly as before.
+	const category = sanitizeCategory(body.category);
+	if (category === null) {
+		return c.json({ success: false, code: "INVALID_CATEGORY" }, 400);
+	}
+
 	const sessionId = body.sessionId;
 	const timestamp = Number(body.timestamp);
 	const signature = body.signature;
@@ -1472,20 +1629,36 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 		const [prevGlobalTop] = await database
 			.select({ score: communityGameHighscores.score })
 			.from(communityGameHighscores)
-			.where(and(eq(communityGameHighscores.gameId, gameId), eq(communityGameHighscores.flagged, false)))
+			.where(
+				and(
+					eq(communityGameHighscores.gameId, gameId),
+					eq(communityGameHighscores.category, category),
+					eq(communityGameHighscores.flagged, false)
+				)
+			)
 			.orderBy(desc(communityGameHighscores.score))
 			.limit(1);
 
 		const [{ sampleSize }] = await database
 			.select({ sampleSize: sql<number>`count(*)::int` })
 			.from(communityGameHighscores)
-			.where(and(eq(communityGameHighscores.gameId, gameId), eq(communityGameHighscores.flagged, false)));
+			.where(
+				and(
+					eq(communityGameHighscores.gameId, gameId),
+					eq(communityGameHighscores.category, category),
+					eq(communityGameHighscores.flagged, false)
+				)
+			);
 
 		const [existing] = await database
 			.select({ score: communityGameHighscores.score, flagged: communityGameHighscores.flagged })
 			.from(communityGameHighscores)
 			.where(
-				and(eq(communityGameHighscores.gameId, gameId), eq(communityGameHighscores.userId, user.id))
+				and(
+					eq(communityGameHighscores.gameId, gameId),
+					eq(communityGameHighscores.userId, user.id),
+					eq(communityGameHighscores.category, category)
+				)
 			)
 			.limit(1);
 
@@ -1502,6 +1675,7 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 				.values({
 					gameId,
 					userId: user.id,
+					category,
 					score,
 					flagged: isAnomalous,
 					flagReason: isAnomalous
@@ -1509,7 +1683,11 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 						: null
 				})
 				.onConflictDoUpdate({
-					target: [communityGameHighscores.gameId, communityGameHighscores.userId],
+					target: [
+						communityGameHighscores.gameId,
+						communityGameHighscores.userId,
+						communityGameHighscores.category
+					],
 					set: {
 						score,
 						flagged: isAnomalous,
@@ -1530,6 +1708,7 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 			success: true,
 			code: "SUCCESS",
 			score,
+			category,
 			playerHighscore,
 			playerHighscoreFlagged,
 			globalHighscore,
@@ -1542,7 +1721,32 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 	}
 });
 
-// --- 10. GET HIGHSCORES (own + global leaderboard top 10) ---
+// --- 9B. LIST A GAME'S LEADERBOARD CATEGORIES ---
+// Lets a player page (or the game itself) discover what leaderboards exist for a game, since
+// categories are created ad hoc by whatever the game submits - there's no upfront catalog.
+communityGamesRoute.get("/:id/highscores/categories", requireAuth, async (c) => {
+	const user = c.get("user");
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+
+	try {
+		const categories = await database
+			.selectDistinct({ category: communityGameHighscores.category })
+			.from(communityGameHighscores)
+			.where(eq(communityGameHighscores.gameId, gameId))
+			.orderBy(communityGameHighscores.category);
+
+		return c.json({ success: true, code: "SUCCESS", categories: categories.map((c) => c.category) });
+	} catch (error) {
+		console.error("Failed to fetch leaderboard categories:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 10. GET HIGHSCORES (own + global leaderboard top 10, for one category) ---
 communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
@@ -1550,6 +1754,10 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 	}
 
 	const gameId = c.req.param("id");
+	const category = sanitizeCategory(c.req.query("category"));
+	if (category === null) {
+		return c.json({ success: false, code: "INVALID_CATEGORY" }, 400);
+	}
 
 	try {
 		// Flagged scores are under review and excluded from everyone's public leaderboard view.
@@ -1563,7 +1771,13 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 			})
 			.from(communityGameHighscores)
 			.innerJoin(users, eq(communityGameHighscores.userId, users.userId))
-			.where(and(eq(communityGameHighscores.gameId, gameId), eq(communityGameHighscores.flagged, false)))
+			.where(
+				and(
+					eq(communityGameHighscores.gameId, gameId),
+					eq(communityGameHighscores.category, category),
+					eq(communityGameHighscores.flagged, false)
+				)
+			)
 			.orderBy(desc(communityGameHighscores.score))
 			.limit(10);
 
@@ -1571,7 +1785,11 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 			.select({ score: communityGameHighscores.score, flagged: communityGameHighscores.flagged })
 			.from(communityGameHighscores)
 			.where(
-				and(eq(communityGameHighscores.gameId, gameId), eq(communityGameHighscores.userId, user.id))
+				and(
+					eq(communityGameHighscores.gameId, gameId),
+					eq(communityGameHighscores.userId, user.id),
+					eq(communityGameHighscores.category, category)
+				)
 			)
 			.limit(1);
 
@@ -1580,6 +1798,7 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 		return c.json({
 			success: true,
 			code: "SUCCESS",
+			category,
 			playerHighscore: own?.score ?? null,
 			playerHighscoreFlagged: own?.flagged ?? false,
 			globalHighscore: rankedLeaderboard[0] ?? null,
@@ -1713,6 +1932,166 @@ communityGamesRoute.delete("/:id/save", requireAuth, async (c) => {
 	}
 });
 
+// --- 13B. UNLOCK ACHIEVEMENT ---
+communityGamesRoute.post("/:id/achievement", requireAuth, async (c) => {
+	const user = c.get("user");
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+	let body;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ success: false, code: "INVALID_JSON" }, 400);
+	}
+
+	const achievementId = typeof body.id === "string" ? body.id : "";
+	if (
+		achievementId.length === 0 ||
+		achievementId.length > MAX_ACHIEVEMENT_ID_LENGTH ||
+		!ACHIEVEMENT_ID_PATTERN.test(achievementId)
+	) {
+		return c.json({ success: false, code: "INVALID_ACHIEVEMENT_ID" }, 400);
+	}
+
+	const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : achievementId;
+	if (name.length > MAX_ACHIEVEMENT_NAME_LENGTH) {
+		return c.json({ success: false, code: "INVALID_ACHIEVEMENT_NAME" }, 400);
+	}
+
+	const description =
+		body.description === undefined || body.description === null ? null : String(body.description);
+	if (description !== null && description.length > MAX_ACHIEVEMENT_DESCRIPTION_LENGTH) {
+		return c.json({ success: false, code: "INVALID_ACHIEVEMENT_DESCRIPTION" }, 400);
+	}
+
+	const icon = body.icon === undefined || body.icon === null ? null : String(body.icon);
+	if (icon !== null && icon.length > MAX_ACHIEVEMENT_ICON_LENGTH) {
+		return c.json({ success: false, code: "INVALID_ACHIEVEMENT_ICON" }, 400);
+	}
+
+	const sessionId = body.sessionId;
+	const timestamp = Number(body.timestamp);
+	const signature = body.signature;
+
+	if (
+		typeof sessionId !== "string" ||
+		!Number.isFinite(timestamp) ||
+		typeof signature !== "string"
+	) {
+		return c.json({ success: false, code: "MISSING_SESSION" }, 400);
+	}
+
+	// Sign over the same shape the injected SDK script hashed client-side.
+	const payloadHash = createHash("sha256")
+		.update(JSON.stringify({ id: achievementId, name, description, icon }))
+		.digest("hex");
+
+	const sessionCheck = await verifyGameSession({
+		sessionId,
+		gameId,
+		userId: user.id,
+		payload: payloadHash,
+		timestamp,
+		signature
+	});
+
+	if (!sessionCheck.valid) {
+		return c.json({ success: false, code: sessionCheck.code }, 403);
+	}
+
+	try {
+		const [game] = await database
+			.select({ id: communityGame.id })
+			.from(communityGame)
+			.where(eq(communityGame.id, gameId))
+			.limit(1);
+
+		if (!game) return c.json({ success: false, code: "GAME_NOT_FOUND" }, 404);
+
+		// First unlock wins - a repeat unlock is a no-op that just confirms the player already has it.
+		const inserted = await database
+			.insert(communityGameAchievements)
+			.values({ gameId, userId: user.id, achievementId, name, description, icon })
+			.onConflictDoNothing({
+				target: [
+					communityGameAchievements.gameId,
+					communityGameAchievements.userId,
+					communityGameAchievements.achievementId
+				]
+			})
+			.returning();
+
+		const isNew = inserted.length > 0;
+
+		const [achievement] = isNew
+			? inserted
+			: await database
+					.select()
+					.from(communityGameAchievements)
+					.where(
+						and(
+							eq(communityGameAchievements.gameId, gameId),
+							eq(communityGameAchievements.userId, user.id),
+							eq(communityGameAchievements.achievementId, achievementId)
+						)
+					)
+					.limit(1);
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			isNew,
+			achievement: {
+				id: achievement.achievementId,
+				name: achievement.name,
+				description: achievement.description,
+				icon: achievement.icon,
+				unlockedAt: achievement.unlockedAt
+			}
+		});
+	} catch (error) {
+		console.error("Failed to unlock achievement:", error);
+		return c.json({ success: false, code: "UNLOCK_FAILED" }, 500);
+	}
+});
+
+// --- 13C. GET MY ACHIEVEMENTS FOR ONE GAME ---
+communityGamesRoute.get("/:id/achievements", requireAuth, async (c) => {
+	const user = c.get("user");
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+
+	try {
+		const rows = await database
+			.select({
+				id: communityGameAchievements.achievementId,
+				name: communityGameAchievements.name,
+				description: communityGameAchievements.description,
+				icon: communityGameAchievements.icon,
+				unlockedAt: communityGameAchievements.unlockedAt
+			})
+			.from(communityGameAchievements)
+			.where(
+				and(
+					eq(communityGameAchievements.gameId, gameId),
+					eq(communityGameAchievements.userId, user.id)
+				)
+			)
+			.orderBy(desc(communityGameAchievements.unlockedAt));
+
+		return c.json({ success: true, code: "SUCCESS", achievements: rows });
+	} catch (error) {
+		console.error("Failed to fetch achievements:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
 // --- 14. MANAGE: LIST ALL PLAYER DATA (creator / mods only) ---
 communityGamesRoute.get("/:id/manage/players", requireAuth, async (c) => {
 	const user = c.get("user");
@@ -1723,9 +2102,11 @@ communityGamesRoute.get("/:id/manage/players", requireAuth, async (c) => {
 	}
 
 	try {
+		// A player can now have one highscore row PER CATEGORY, so this is a list, not a single row.
 		const highscores = await database
 			.select({
 				userId: communityGameHighscores.userId,
+				category: communityGameHighscores.category,
 				score: communityGameHighscores.score,
 				flagged: communityGameHighscores.flagged,
 				flagReason: communityGameHighscores.flagReason,
@@ -1760,18 +2141,31 @@ communityGamesRoute.get("/:id/manage/players", requireAuth, async (c) => {
 						.where(inArray(users.userId, userIds))
 				: [];
 
-		const highscoreMap = new Map(highscores.map((h) => [h.userId, h]));
+		const highscoresByUser = new Map<string, typeof highscores>();
+		for (const h of highscores) {
+			const list = highscoresByUser.get(h.userId) ?? [];
+			list.push(h);
+			highscoresByUser.set(h.userId, list);
+		}
 		const saveMap = new Map(saves.map((s) => [s.userId, s]));
 
-		const players = playerUsers.map((p) => ({
-			...p,
-			highscore: highscoreMap.get(p.userId)?.score ?? null,
-			highscoreFlagged: highscoreMap.get(p.userId)?.flagged ?? false,
-			highscoreFlagReason: highscoreMap.get(p.userId)?.flagReason ?? null,
-			highscoreUpdatedAt: highscoreMap.get(p.userId)?.updatedAt ?? null,
-			save: saveMap.get(p.userId)?.data ?? null,
-			saveUpdatedAt: saveMap.get(p.userId)?.updatedAt ?? null
-		}));
+		const players = playerUsers.map((p) => {
+			const userHighscores = highscoresByUser.get(p.userId) ?? [];
+			const defaultEntry = userHighscores.find((h) => h.category === DEFAULT_LEADERBOARD_CATEGORY);
+
+			return {
+				...p,
+				// One entry per leaderboard category this player has a score in.
+				highscores: userHighscores,
+				// Backward-compatible single-value fields, mirroring the "default" category only.
+				highscore: defaultEntry?.score ?? null,
+				highscoreFlagged: defaultEntry?.flagged ?? false,
+				highscoreFlagReason: defaultEntry?.flagReason ?? null,
+				highscoreUpdatedAt: defaultEntry?.updatedAt ?? null,
+				save: saveMap.get(p.userId)?.data ?? null,
+				saveUpdatedAt: saveMap.get(p.userId)?.updatedAt ?? null
+			};
+		});
 
 		await logGameAudit({
 			gameId,
@@ -1914,6 +2308,11 @@ communityGamesRoute.patch("/:id/manage/highscores/:userId", requireAuth, async (
 		return c.json({ success: false, code: "INVALID_SCORE" }, 400);
 	}
 
+	const category = sanitizeCategory(body.category ?? c.req.query("category"));
+	if (category === null) {
+		return c.json({ success: false, code: "INVALID_CATEGORY" }, 400);
+	}
+
 	try {
 		const [previous] = await database
 			.select({ score: communityGameHighscores.score })
@@ -1921,7 +2320,8 @@ communityGamesRoute.patch("/:id/manage/highscores/:userId", requireAuth, async (
 			.where(
 				and(
 					eq(communityGameHighscores.gameId, gameId),
-					eq(communityGameHighscores.userId, targetUserId)
+					eq(communityGameHighscores.userId, targetUserId),
+					eq(communityGameHighscores.category, category)
 				)
 			)
 			.limit(1);
@@ -1929,9 +2329,21 @@ communityGamesRoute.patch("/:id/manage/highscores/:userId", requireAuth, async (
 		const now = new Date();
 		await database
 			.insert(communityGameHighscores)
-			.values({ gameId, userId: targetUserId, score, flagged: false, flagReason: null, updatedAt: now })
+			.values({
+				gameId,
+				userId: targetUserId,
+				category,
+				score,
+				flagged: false,
+				flagReason: null,
+				updatedAt: now
+			})
 			.onConflictDoUpdate({
-				target: [communityGameHighscores.gameId, communityGameHighscores.userId],
+				target: [
+					communityGameHighscores.gameId,
+					communityGameHighscores.userId,
+					communityGameHighscores.category
+				],
 				// A manual edit by a creator/mod is itself a form of approval - clear any anomaly flag.
 				set: { score, flagged: false, flagReason: null, updatedAt: now }
 			});
@@ -1941,10 +2353,10 @@ communityGamesRoute.patch("/:id/manage/highscores/:userId", requireAuth, async (
 			creatorId: user.id,
 			targetUserId,
 			action: "edit_highscore",
-			details: { previousScore: previous?.score ?? null, newScore: score }
+			details: { category, previousScore: previous?.score ?? null, newScore: score }
 		});
 
-		return c.json({ success: true, code: "SUCCESS", score });
+		return c.json({ success: true, code: "SUCCESS", category, score });
 	} catch (error) {
 		console.error("Failed to edit player highscore:", error);
 		return c.json({ success: false, code: "EDIT_FAILED" }, 500);
@@ -1961,6 +2373,11 @@ communityGamesRoute.post("/:id/manage/highscores/:userId/approve", requireAuth, 
 		return c.json({ success: false, code: "FORBIDDEN" }, 403);
 	}
 
+	const category = sanitizeCategory(c.req.query("category"));
+	if (category === null) {
+		return c.json({ success: false, code: "INVALID_CATEGORY" }, 400);
+	}
+
 	try {
 		const [updated] = await database
 			.update(communityGameHighscores)
@@ -1968,7 +2385,8 @@ communityGamesRoute.post("/:id/manage/highscores/:userId/approve", requireAuth, 
 			.where(
 				and(
 					eq(communityGameHighscores.gameId, gameId),
-					eq(communityGameHighscores.userId, targetUserId)
+					eq(communityGameHighscores.userId, targetUserId),
+					eq(communityGameHighscores.category, category)
 				)
 			)
 			.returning({ score: communityGameHighscores.score });
@@ -1980,7 +2398,7 @@ communityGamesRoute.post("/:id/manage/highscores/:userId/approve", requireAuth, 
 			creatorId: user.id,
 			targetUserId,
 			action: "approve_highscore",
-			details: { approvedScore: updated.score }
+			details: { category, approvedScore: updated.score }
 		});
 
 		return c.json({ success: true, code: "SUCCESS" });
@@ -2000,6 +2418,11 @@ communityGamesRoute.delete("/:id/manage/highscores/:userId", requireAuth, async 
 		return c.json({ success: false, code: "FORBIDDEN" }, 403);
 	}
 
+	const category = sanitizeCategory(c.req.query("category"));
+	if (category === null) {
+		return c.json({ success: false, code: "INVALID_CATEGORY" }, 400);
+	}
+
 	try {
 		const [previous] = await database
 			.select({ score: communityGameHighscores.score })
@@ -2007,7 +2430,8 @@ communityGamesRoute.delete("/:id/manage/highscores/:userId", requireAuth, async 
 			.where(
 				and(
 					eq(communityGameHighscores.gameId, gameId),
-					eq(communityGameHighscores.userId, targetUserId)
+					eq(communityGameHighscores.userId, targetUserId),
+					eq(communityGameHighscores.category, category)
 				)
 			)
 			.limit(1);
@@ -2017,7 +2441,8 @@ communityGamesRoute.delete("/:id/manage/highscores/:userId", requireAuth, async 
 			.where(
 				and(
 					eq(communityGameHighscores.gameId, gameId),
-					eq(communityGameHighscores.userId, targetUserId)
+					eq(communityGameHighscores.userId, targetUserId),
+					eq(communityGameHighscores.category, category)
 				)
 			);
 
@@ -2026,7 +2451,7 @@ communityGamesRoute.delete("/:id/manage/highscores/:userId", requireAuth, async 
 			creatorId: user.id,
 			targetUserId,
 			action: "delete_highscore",
-			details: { deletedScore: previous?.score ?? null }
+			details: { category, deletedScore: previous?.score ?? null }
 		});
 
 		return c.json({ success: true, code: "SUCCESS" });
