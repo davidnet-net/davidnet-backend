@@ -2469,6 +2469,15 @@ communityGamesRoute.get("/:id/file/*", async (c) => {
 
 	if (!id || !filePath) return c.json({ error: "Missing parameters" }, 400);
 
+	// Moderation takedowns must actually take the game down - the metadata endpoints (GET /:id,
+	// GET /feed) already hide moderated games, but this file route served the raw content
+	// regardless, so a removed game's iframe/src URL kept working for anyone who had it.
+	const [game] = await database
+		.select({ isModerated: communityGame.isModerated })
+		.from(communityGame)
+		.where(eq(communityGame.id, id));
+	if (!game || game.isModerated) return c.json({ error: "File not found" }, 404);
+
 	const s3Key = `${id}/${filePath}`;
 
 	try {
@@ -2508,7 +2517,13 @@ communityGamesRoute.get("/:id/file/*", async (c) => {
 				// Without this, frame-src also falls back to the permissive default-src above, so
 				// uploaded game code could embed third-party iframes (ad/tracker overlays,
 				// clickjacking, phishing). No legitimate HTML5 game needs to nest an iframe.
-				"frame-src 'none';"
+				"frame-src 'none'; " +
+				// Only our own player page may frame this file, and only with the sandbox attribute
+				// IT controls (no allow-same-origin). Without this, any external site could frame the
+				// file directly with its own (unrestricted) sandbox attribute and recover the real
+				// davidnet-backend.davidnet.net origin for the uploaded game's JS, defeating the
+				// sandboxing entirely and exposing session cookies.
+				"frame-ancestors https://davidnet.net https://*.davidnet.net;"
 		);
 
 		return c.body(s3Object.Body.transformToWebStream());

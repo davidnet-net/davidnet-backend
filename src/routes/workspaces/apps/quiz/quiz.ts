@@ -166,6 +166,28 @@ quiz.get("/", async (c) => {
 
 	try {
 		if (teamId) {
+			const hasOrgWideAccess = await hasPermission({
+				userId,
+				workspaceId,
+				permissionKey: "quiz:list"
+			});
+
+			const [teamRole] = await database
+				.select({ teamId: teamUserRoles.teamId })
+				.from(teamUserRoles)
+				.innerJoin(rolePermissions, eq(teamUserRoles.roleId, rolePermissions.roleId))
+				.where(
+					and(
+						eq(teamUserRoles.userId, userId),
+						eq(teamUserRoles.teamId, teamId),
+						eq(rolePermissions.permissionKey, "quiz:list")
+					)
+				);
+
+			if (!hasOrgWideAccess && !teamRole) {
+				return c.json({ success: false, code: "FORBIDDEN" }, 403);
+			}
+
 			const quizList = await database
 				.select()
 				.from(quizzes)

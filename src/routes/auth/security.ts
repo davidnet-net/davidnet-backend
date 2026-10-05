@@ -18,6 +18,7 @@ export const security = new Hono<Env>();
 security.post(
 	"/change-password",
 	requireAuth,
+	createRateLimiter(5, 15 * 60 * 1000),
 	sValidator("json", changePasswordSchema),
 	async (c) => {
 		const userID = c.get("user").id;

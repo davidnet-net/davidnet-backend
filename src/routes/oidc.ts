@@ -25,6 +25,14 @@ const clientSecrets: Record<string, string | undefined> = {
 	headscale: process.env.HEADSCALE_CLIENT_SECRET
 };
 
+// Exact-match allowlist of redirect_uri per client. Without this, /authorize would hand the
+// authorization code to ANY attacker-supplied redirect_uri, letting a malicious link (or a
+// malicious page navigating a logged-in, VPN-enabled user's browser) steal a code and exchange
+// it for that user's internal OIDC/VPN access token.
+const clientRedirectUris: Record<string, string | undefined> = {
+	headscale: process.env.HEADSCALE_REDIRECT_URI
+};
+
 oidc.get("/authorize", async (c) => {
 	const clientId = c.req.query("client_id");
 	const redirectUri = c.req.query("redirect_uri");
@@ -46,6 +54,14 @@ oidc.get("/authorize", async (c) => {
 	if (!clientId || !clientRequirements[clientId]) {
 		return c.json(
 			{ success: false, error: "unauthorized_client", message: `Unknown client_id: ${clientId}` },
+			400
+		);
+	}
+
+	const expectedRedirectUri = clientRedirectUris[clientId];
+	if (!expectedRedirectUri || redirectUri !== expectedRedirectUri) {
+		return c.json(
+			{ success: false, error: "invalid_request", message: "redirect_uri is not registered for this client" },
 			400
 		);
 	}
