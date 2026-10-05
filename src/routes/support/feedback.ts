@@ -176,8 +176,14 @@ feedback.get("/attachment/*", requireAuth, async (c) => {
 	}
 
 	const url = new URL(c.req.url);
-	const key = url.pathname.split("/attachment/")[1];
-	if (!key) return c.json({ success: false, code: "MISSING_KEY" }, 400);
+	const rawKey = url.pathname.split("/attachment/")[1];
+	if (!rawKey) return c.json({ success: false, code: "MISSING_KEY" }, 400);
+
+	// url.pathname keeps percent-encoding as-is (e.g. a space in the original filename survives
+	// as "%20") - the key was stored in the bucket with the literal, decoded filename, so it has
+	// to be decoded back before the lookup or it 404s on any attachment with a space/unicode/etc.
+	// in its name.
+	const key = decodeURIComponent(rawKey);
 
 	try {
 		const object = await getFromBucket("feedback", key);
