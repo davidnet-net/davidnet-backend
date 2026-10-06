@@ -7,7 +7,8 @@ import {
 	users,
 	userPreferences,
 	userPrivacyPreferences,
-	internalAccess
+	internalAccess,
+	accountModerationStatus
 } from "../../core/database/schema/schema";
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
 import { collectAuth } from "../../middlewares/collectAuth";
@@ -73,18 +74,28 @@ profile.get("/", collectAuth, async (c) => {
 			locationVisibility: userPrivacyPreferences.locationVisibility,
 			emailVisibility: userPrivacyPreferences.emailVisibility,
 
-			isInternal: internalAccess.internalAccess
+			isInternal: internalAccess.internalAccess,
+			bannedUntil: accountModerationStatus.bannedUntil
 		})
 		.from(users)
 		.leftJoin(userPreferences, eq(users.userId, userPreferences.userId))
 		.leftJoin(userPrivacyPreferences, eq(users.userId, userPrivacyPreferences.userId))
 		.leftJoin(internalAccess, eq(users.userId, internalAccess.userId))
+		.leftJoin(accountModerationStatus, eq(users.userId, accountModerationStatus.userId))
 		.where(whereCondition)
 		.limit(1);
 
 	const targetUser = result[0];
 
 	if (!targetUser) {
+		return c.json({ error: "User not found" }, 404);
+	}
+
+	const isOwnProfile = requestingUserId === targetUser.userId;
+	const isBanned = Boolean(targetUser.bannedUntil && new Date(targetUser.bannedUntil) > new Date());
+
+	// Banned users' profiles are hidden from everyone except themselves.
+	if (isBanned && !isOwnProfile) {
 		return c.json({ error: "User not found" }, 404);
 	}
 
@@ -102,8 +113,6 @@ profile.get("/", collectAuth, async (c) => {
 		);
 
 	const acceptedConnectionsCount = Number(connectionsCountResult[0]?.count ?? 0);
-
-	const isOwnProfile = requestingUserId === targetUser.userId;
 
 	const canView = (visibility: string | null | undefined) => {
 		if (isOwnProfile) return true;
