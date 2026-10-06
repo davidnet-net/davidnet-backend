@@ -5,6 +5,7 @@ import { websocket } from "hono/bun";
 
 import { closeDbConnection } from "./core/database/client";
 import { setupNextHealthBeat, stopHealthBeat } from "./core/health/health";
+import { setupNextRoutineTasksBeat, stopRoutineTasksBeat } from "./core/routineTasks";
 import { registerMiddlewares } from "./middlewares";
 import { registerRoutes } from "./routes";
 
@@ -17,6 +18,9 @@ async function init() {
 
 	console.log("[Init]: Starting healthBeat.");
 	setupNextHealthBeat();
+
+	console.log("[Init]: Starting routineTasksBeat.");
+	setupNextRoutineTasksBeat();
 
 	console.log("[Init]: Registering middlewares.");
 	await registerMiddlewares(app);
@@ -36,6 +40,7 @@ const handleShutdown = async (signal: string) => {
 	console.log(`[Shutdown]: Received ${signal}. Closing server...`);
 
 	stopHealthBeat();
+	stopRoutineTasksBeat();
 	await server?.stop();
 	await closeDbConnection();
 
