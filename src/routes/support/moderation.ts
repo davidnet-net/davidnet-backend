@@ -52,6 +52,23 @@ async function isModerator(userId: string): Promise<boolean> {
 	return Boolean(access && access.internalAccess && access.supportAccess);
 }
 
+// --- HELPER: RESOLVE A MODERATOR-TYPED "username OR userId" INTO A REAL userId ---
+// Typing out a raw UUID by hand is painful for a moderator - every endpoint that takes a target
+// user from a text field accepts either their @username or their userId and resolves it here.
+async function resolveUserId(identifier: string): Promise<string | null> {
+	if (UUID_REGEX.test(identifier)) {
+		return identifier;
+	}
+
+	const [match] = await database
+		.select({ userId: users.userId })
+		.from(users)
+		.where(eq(users.username, identifier))
+		.limit(1);
+
+	return match?.userId ?? null;
+}
+
 // ============================================================================
 // USER ENDPOINTS
 // ============================================================================
@@ -553,10 +570,10 @@ moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
 	}
 
-	const targetUserId = c.req.param("userId");
+	const targetUserId = await resolveUserId(c.req.param("userId"));
 
-	if (!UUID_REGEX.test(targetUserId)) {
-		return c.json({ success: false, code: "INVALID_USER_ID" }, 400);
+	if (!targetUserId) {
+		return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
 	}
 	let body;
 
@@ -690,10 +707,10 @@ moderationRoute.get("/users/:userId/ban-status", requireAuth, async (c) => {
 		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
 	}
 
-	const targetUserId = c.req.param("userId");
+	const targetUserId = await resolveUserId(c.req.param("userId"));
 
-	if (!UUID_REGEX.test(targetUserId)) {
-		return c.json({ success: false, code: "INVALID_USER_ID" }, 400);
+	if (!targetUserId) {
+		return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
 	}
 
 	try {
@@ -738,10 +755,10 @@ moderationRoute.get("/users/:userId/violations", requireAuth, async (c) => {
 		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
 	}
 
-	const targetUserId = c.req.param("userId");
+	const targetUserId = await resolveUserId(c.req.param("userId"));
 
-	if (!UUID_REGEX.test(targetUserId)) {
-		return c.json({ success: false, code: "INVALID_USER_ID" }, 400);
+	if (!targetUserId) {
+		return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
 	}
 
 	try {
@@ -850,10 +867,10 @@ moderationRoute.get("/users/:userId/ban-events", requireAuth, async (c) => {
 		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
 	}
 
-	const targetUserId = c.req.param("userId");
+	const targetUserId = await resolveUserId(c.req.param("userId"));
 
-	if (!UUID_REGEX.test(targetUserId)) {
-		return c.json({ success: false, code: "INVALID_USER_ID" }, 400);
+	if (!targetUserId) {
+		return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
 	}
 
 	try {
@@ -894,10 +911,10 @@ moderationRoute.get("/users/:userId/ips", requireAuth, async (c) => {
 		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
 	}
 
-	const targetUserId = c.req.param("userId");
+	const targetUserId = await resolveUserId(c.req.param("userId"));
 
-	if (!UUID_REGEX.test(targetUserId)) {
-		return c.json({ success: false, code: "INVALID_USER_ID" }, 400);
+	if (!targetUserId) {
+		return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
 	}
 
 	try {
