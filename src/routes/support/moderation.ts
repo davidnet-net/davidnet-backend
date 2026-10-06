@@ -554,6 +554,10 @@ moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 	}
 
 	const targetUserId = c.req.param("userId");
+
+	if (!UUID_REGEX.test(targetUserId)) {
+		return c.json({ success: false, code: "INVALID_USER_ID" }, 400);
+	}
 	let body;
 
 	try {
@@ -688,6 +692,10 @@ moderationRoute.get("/users/:userId/ban-status", requireAuth, async (c) => {
 
 	const targetUserId = c.req.param("userId");
 
+	if (!UUID_REGEX.test(targetUserId)) {
+		return c.json({ success: false, code: "INVALID_USER_ID" }, 400);
+	}
+
 	try {
 		const [status] = await database
 			.select()
@@ -731,6 +739,10 @@ moderationRoute.get("/users/:userId/violations", requireAuth, async (c) => {
 	}
 
 	const targetUserId = c.req.param("userId");
+
+	if (!UUID_REGEX.test(targetUserId)) {
+		return c.json({ success: false, code: "INVALID_USER_ID" }, 400);
+	}
 
 	try {
 		const userViolations = await database
@@ -840,6 +852,10 @@ moderationRoute.get("/users/:userId/ban-events", requireAuth, async (c) => {
 
 	const targetUserId = c.req.param("userId");
 
+	if (!UUID_REGEX.test(targetUserId)) {
+		return c.json({ success: false, code: "INVALID_USER_ID" }, 400);
+	}
+
 	try {
 		const moderatorUser = alias(users, "moderator_user");
 
@@ -879,6 +895,10 @@ moderationRoute.get("/users/:userId/ips", requireAuth, async (c) => {
 	}
 
 	const targetUserId = c.req.param("userId");
+
+	if (!UUID_REGEX.test(targetUserId)) {
+		return c.json({ success: false, code: "INVALID_USER_ID" }, 400);
+	}
 
 	try {
 		const ips = await database
