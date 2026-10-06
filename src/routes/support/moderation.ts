@@ -24,6 +24,13 @@ import { requireAuth, type Env } from "../../middlewares/requireAuth";
 
 export const moderationRoute = new Hono<Env>();
 
+// The profile page passes whatever identifier is in its URL slug, which per the
+// site-wide profile link convention is a username, not a userId - even though the
+// report payload field is named "reportedId" (same situation as social/connections.ts's
+// "requestedUserID"). Comparing that directly against the uuid-typed userId column
+// throws a Postgres type error, so it needs resolving first.
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // --- HELPER: CHECK MODERATOR PERMISSIONS ---
 async function isModerator(userId: string): Promise<boolean> {
 	const [access] = await database
@@ -69,6 +76,7 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 	}
 
 	let actualReportedUserId: string;
+	let resolvedReportedId = reportedId;
 
 	try {
 		if (reportType === "short") {
@@ -83,16 +91,18 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 			}
 			actualReportedUserId = targetShort.userId;
 		} else if (reportType === "profile") {
+			const isUuid = UUID_REGEX.test(reportedId);
 			const [targetUser] = await database
 				.select({ userId: users.userId })
 				.from(users)
-				.where(eq(users.userId, reportedId))
+				.where(isUuid ? eq(users.userId, reportedId) : eq(users.username, reportedId))
 				.limit(1);
 
 			if (!targetUser) {
 				return c.json({ success: false, code: "USER_NOT_FOUND" }, 404);
 			}
 			actualReportedUserId = targetUser.userId;
+			resolvedReportedId = targetUser.userId;
 		} else if (reportType === "game") {
 			const [targetGame] = await database
 				.select({ userId: communityGame.userId })
@@ -114,7 +124,7 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 				reporterId,
 				reportedUserId: actualReportedUserId,
 				reportType: reportType as "profile" | "short" | "game",
-				reportedId,
+				reportedId: resolvedReportedId,
 				reason: reason.trim(),
 				status: "pending"
 			})
