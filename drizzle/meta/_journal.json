@@ -281,6 +281,13 @@
       "when": 1791217630528,
       "tag": "0039_organic_kid_colt",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1791309492423,
+      "tag": "0040_redundant_mantis",
+      "breakpoints": true
     }
   ]
 }
