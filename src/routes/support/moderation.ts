@@ -11,16 +11,22 @@ import {
 	users,
 	shorts,
 	violations,
-	communityGame
+	communityGame,
+	banEvents,
+	userIpLog,
+	bannedIps
 } from "../../core/database/schema/schema";
 import {
 	createReportSchema,
 	updateReportStatusSchema,
 	banUserSchema,
-	createViolationSchema
+	createViolationSchema,
+	editViolationSchema,
+	banIpSchema
 } from "../../core/requestSchemas/moderation";
 import { collectAuth } from "../../middlewares/collectAuth";
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
+import { notifyActivity } from "../../core/shared/activityWebhook";
 
 export const moderationRoute = new Hono<Env>();
 
@@ -408,6 +414,12 @@ moderationRoute.post("/violations", requireAuth, async (c) => {
 			})
 			.returning();
 
+		void notifyActivity("⚠️ Violation issued", moderatorId, {
+			"Violation ID": newViolation.id,
+			"Target User ID": userId,
+			Type: reportedType
+		});
+
 		return c.json(
 			{
 				success: true,
@@ -419,6 +431,116 @@ moderationRoute.post("/violations", requireAuth, async (c) => {
 	} catch (error) {
 		console.error("Failed to create violation:", error);
 		return c.json({ success: false, code: "CREATION_FAILED" }, 500);
+	}
+});
+
+// --- 7B. EDIT A VIOLATION ---
+moderationRoute.patch("/violations/:id", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const violationId = c.req.param("id");
+	let body;
+
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ success: false, code: "INVALID_JSON" }, 400);
+	}
+
+	const result = editViolationSchema(body);
+	if (result instanceof type.errors) {
+		return c.json({ success: false, code: "INVALID_REQUEST_BODY", errors: result.summary }, 400);
+	}
+
+	const { reason, moderatorReason } = result;
+
+	if (reason === undefined && moderatorReason === undefined) {
+		return c.json({ success: false, code: "NO_FIELDS_TO_UPDATE" }, 400);
+	}
+
+	if (reason !== undefined && reason.trim().length === 0) {
+		return c.json({ success: false, code: "MISSING_REASON" }, 400);
+	}
+
+	if (reason !== undefined && reason.length > 2000) {
+		return c.json({ success: false, code: "REASON_TOO_LONG" }, 400);
+	}
+
+	if (typeof moderatorReason === "string" && moderatorReason.length > 2000) {
+		return c.json({ success: false, code: "MODERATOR_REASON_TOO_LONG" }, 400);
+	}
+
+	try {
+		const [existing] = await database
+			.select()
+			.from(violations)
+			.where(eq(violations.id, violationId))
+			.limit(1);
+
+		if (!existing) {
+			return c.json({ success: false, code: "VIOLATION_NOT_FOUND" }, 404);
+		}
+
+		const [updatedViolation] = await database
+			.update(violations)
+			.set({
+				...(reason !== undefined ? { reason: reason.trim() } : {}),
+				...(moderatorReason !== undefined
+					? { moderatorReason: moderatorReason === null ? null : moderatorReason.trim() }
+					: {}),
+				updatedAt: new Date()
+			})
+			.where(eq(violations.id, violationId))
+			.returning();
+
+		void notifyActivity("✏️ Violation edited", moderatorId, {
+			"Violation ID": violationId,
+			"Target User ID": existing.userId
+		});
+
+		return c.json({ success: true, code: "VIOLATION_UPDATED", violation: updatedViolation });
+	} catch (error) {
+		console.error("Failed to edit violation:", error);
+		return c.json({ success: false, code: "UPDATE_FAILED" }, 500);
+	}
+});
+
+// --- 7C. DELETE A VIOLATION ---
+moderationRoute.delete("/violations/:id", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const violationId = c.req.param("id");
+
+	try {
+		const [existing] = await database
+			.select()
+			.from(violations)
+			.where(eq(violations.id, violationId))
+			.limit(1);
+
+		if (!existing) {
+			return c.json({ success: false, code: "VIOLATION_NOT_FOUND" }, 404);
+		}
+
+		await database.delete(violations).where(eq(violations.id, violationId));
+
+		void notifyActivity("🗑️ Violation deleted", moderatorId, {
+			"Violation ID": violationId,
+			"Target User ID": existing.userId
+		});
+
+		return c.json({ success: true, code: "VIOLATION_DELETED" });
+	} catch (error) {
+		console.error("Failed to delete violation:", error);
+		return c.json({ success: false, code: "DELETE_FAILED" }, 500);
 	}
 });
 
@@ -444,7 +566,7 @@ moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 		return c.json({ success: false, code: "INVALID_DATE_FORMAT", errors: result.summary }, 400);
 	}
 
-	const { bannedUntil } = result;
+	const { bannedUntil, violationId, reason } = result;
 
 	let bannedDate: Date | null = null;
 	if (bannedUntil !== null && bannedUntil !== undefined) {
@@ -454,26 +576,100 @@ moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 		}
 	}
 
+	// DSA Art. 17 requires a statement of reasons whenever we restrict an account - so an actual
+	// ban (not an unban) must always resolve to a violation: either an existing one the moderator
+	// picked, or a fresh one created from the typed-in reason. Unbanning needs neither.
+	let resolvedViolationId: string | null = null;
+	let resolvedReason: string | null = null;
+
+	if (bannedDate !== null) {
+		if (violationId) {
+			const [existingViolation] = await database
+				.select()
+				.from(violations)
+				.where(and(eq(violations.id, violationId), eq(violations.userId, targetUserId)))
+				.limit(1);
+
+			if (!existingViolation) {
+				return c.json({ success: false, code: "VIOLATION_NOT_FOUND" }, 400);
+			}
+
+			resolvedViolationId = existingViolation.id;
+			resolvedReason = existingViolation.moderatorReason ?? existingViolation.reason;
+		} else if (reason && reason.trim().length > 0) {
+			const [newViolation] = await database
+				.insert(violations)
+				.values({
+					userId: targetUserId,
+					reportedType: "profile",
+					reportedId: targetUserId,
+					reason: reason.trim()
+				})
+				.returning();
+
+			resolvedViolationId = newViolation.id;
+			resolvedReason = newViolation.reason;
+		} else {
+			return c.json({ success: false, code: "MISSING_REASON_OR_VIOLATION" }, 400);
+		}
+	}
+
 	try {
-		const [updatedStatus] = await database
-			.insert(accountModerationStatus)
-			.values({
+		const metadata = c.get("metadata");
+
+		const updatedStatus = await database.transaction(async (tx) => {
+			const [status] = await tx
+				.insert(accountModerationStatus)
+				.values({
+					userId: targetUserId,
+					bannedUntil: bannedDate
+				})
+				.onConflictDoUpdate({
+					target: accountModerationStatus.userId,
+					set: {
+						bannedUntil: bannedDate,
+						updatedAt: new Date()
+					}
+				})
+				.returning();
+
+			await tx.insert(banEvents).values({
 				userId: targetUserId,
-				bannedUntil: bannedDate
-			})
-			.onConflictDoUpdate({
-				target: accountModerationStatus.userId,
-				set: {
-					bannedUntil: bannedDate,
-					updatedAt: new Date()
-				}
-			})
-			.returning();
+				moderatorId,
+				action: bannedDate ? "ban" : "unban",
+				bannedUntil: bannedDate,
+				violationId: resolvedViolationId,
+				reason: resolvedReason,
+				moderatorIp: metadata?.ip ?? null,
+				moderatorCountryCode: metadata?.countryCode ?? null
+			});
+
+			// Hiding is one-directional: a ban cascades to hide all of the user's content, but
+			// unbanning never auto-restores it - each piece stays hidden until a moderator reviews
+			// and unhides it individually.
+			if (bannedDate) {
+				await tx.update(shorts).set({ isModerated: true }).where(eq(shorts.userId, targetUserId));
+				await tx
+					.update(communityGame)
+					.set({ isModerated: true })
+					.where(eq(communityGame.userId, targetUserId));
+			}
+
+			return status;
+		});
+
+		void notifyActivity(bannedDate ? "🔨 User banned" : "✅ User unbanned", moderatorId, {
+			"Target User ID": targetUserId,
+			"Banned Until": bannedDate ? bannedDate.toISOString() : null,
+			Reason: resolvedReason,
+			"Violation ID": resolvedViolationId
+		});
 
 		return c.json({
 			success: true,
 			code: bannedDate ? "USER_BANNED" : "USER_UNBANNED",
-			status: updatedStatus
+			status: updatedStatus,
+			violationId: resolvedViolationId
 		});
 	} catch (error) {
 		console.error("Failed to update user ban status:", error);
@@ -633,6 +829,209 @@ moderationRoute.get("/bans/all", requireAuth, async (c) => {
 	}
 });
 
+// --- 12B. GET BAN/UNBAN HISTORY FOR A USER (statement-of-reasons audit trail) ---
+moderationRoute.get("/users/:userId/ban-events", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const targetUserId = c.req.param("userId");
+
+	try {
+		const moderatorUser = alias(users, "moderator_user");
+
+		const events = await database
+			.select({
+				id: banEvents.id,
+				action: banEvents.action,
+				bannedUntil: banEvents.bannedUntil,
+				violationId: banEvents.violationId,
+				reason: banEvents.reason,
+				moderatorId: banEvents.moderatorId,
+				moderatorUsername: moderatorUser.username,
+				createdAt: banEvents.createdAt
+			})
+			.from(banEvents)
+			.innerJoin(moderatorUser, eq(banEvents.moderatorId, moderatorUser.userId))
+			.where(eq(banEvents.userId, targetUserId))
+			.orderBy(desc(banEvents.createdAt));
+
+		return c.json({ success: true, code: "SUCCESS", events });
+	} catch (error) {
+		console.error("Failed to fetch ban events:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// ============================================================================
+// IP MODERATION (requires internalAccess AND supportAccess)
+// ============================================================================
+
+// --- IP-1. GET IPs A USER HAS CONNECTED FROM ---
+moderationRoute.get("/users/:userId/ips", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const targetUserId = c.req.param("userId");
+
+	try {
+		const ips = await database
+			.select({
+				ip: userIpLog.ip,
+				countryCode: userIpLog.countryCode,
+				userAgent: userIpLog.userAgent,
+				lastSeenAt: userIpLog.lastSeenAt,
+				createdAt: userIpLog.createdAt,
+				isBanned: bannedIps.ip
+			})
+			.from(userIpLog)
+			.leftJoin(bannedIps, eq(userIpLog.ip, bannedIps.ip))
+			.where(eq(userIpLog.userId, targetUserId))
+			.orderBy(desc(userIpLog.lastSeenAt));
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			ips: ips.map((row) => ({ ...row, isBanned: row.isBanned !== null }))
+		});
+	} catch (error) {
+		console.error("Failed to fetch user IPs:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- IP-2. GET USERS LINKED TO AN IP ---
+moderationRoute.get("/ips/:ip/users", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const ip = c.req.param("ip");
+
+	try {
+		const linkedUsers = await database
+			.select({
+				userId: users.userId,
+				username: users.username,
+				displayName: users.displayName,
+				avatarUrl: users.avatarUrl,
+				lastSeenAt: userIpLog.lastSeenAt,
+				userAgent: userIpLog.userAgent
+			})
+			.from(userIpLog)
+			.innerJoin(users, eq(userIpLog.userId, users.userId))
+			.where(eq(userIpLog.ip, ip))
+			.orderBy(desc(userIpLog.lastSeenAt));
+
+		return c.json({ success: true, code: "SUCCESS", users: linkedUsers });
+	} catch (error) {
+		console.error("Failed to fetch users for IP:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- IP-3. GET ALL BANNED IPs ---
+moderationRoute.get("/ips/banned", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	try {
+		const moderatorUser = alias(users, "moderator_user");
+
+		const banned = await database
+			.select({
+				ip: bannedIps.ip,
+				reason: bannedIps.reason,
+				createdAt: bannedIps.createdAt,
+				moderatorUsername: moderatorUser.username
+			})
+			.from(bannedIps)
+			.innerJoin(moderatorUser, eq(bannedIps.moderatorId, moderatorUser.userId))
+			.orderBy(desc(bannedIps.createdAt));
+
+		return c.json({ success: true, code: "SUCCESS", bannedIps: banned });
+	} catch (error) {
+		console.error("Failed to fetch banned IPs:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- IP-4. BAN AN IP (blocks it across the whole backend, not just this user's actions) ---
+moderationRoute.post("/ips/:ip/ban", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const ip = c.req.param("ip").trim();
+	if (!ip) {
+		return c.json({ success: false, code: "INVALID_IP" }, 400);
+	}
+
+	let body;
+	try {
+		body = await c.req.json();
+	} catch {
+		body = {};
+	}
+
+	const result = banIpSchema(body);
+	if (result instanceof type.errors) {
+		return c.json({ success: false, code: "INVALID_REQUEST_BODY", errors: result.summary }, 400);
+	}
+
+	try {
+		const [banned] = await database
+			.insert(bannedIps)
+			.values({ ip, moderatorId, reason: result.reason?.trim() || null })
+			.onConflictDoUpdate({
+				target: bannedIps.ip,
+				set: { reason: result.reason?.trim() || null, moderatorId }
+			})
+			.returning();
+
+		void notifyActivity("🚫 IP banned", moderatorId, { IP: ip, Reason: banned.reason });
+
+		return c.json({ success: true, code: "IP_BANNED", bannedIp: banned });
+	} catch (error) {
+		console.error("Failed to ban IP:", error);
+		return c.json({ success: false, code: "UPDATE_FAILED" }, 500);
+	}
+});
+
+// --- IP-5. UNBAN AN IP ---
+moderationRoute.delete("/ips/:ip/ban", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const ip = c.req.param("ip").trim();
+
+	try {
+		await database.delete(bannedIps).where(eq(bannedIps.ip, ip));
+
+		void notifyActivity("✅ IP unbanned", moderatorId, { IP: ip });
+
+		return c.json({ success: true, code: "IP_UNBANNED" });
+	} catch (error) {
+		console.error("Failed to unban IP:", error);
+		return c.json({ success: false, code: "UPDATE_FAILED" }, 500);
+	}
+});
+
 // --- 13. GET ALL SHORTS (CHRONOLOGICAL, MODERATOR BROWSER) ---
 moderationRoute.get("/shorts/all", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
@@ -677,6 +1076,52 @@ moderationRoute.get("/shorts/all", requireAuth, async (c) => {
 	}
 });
 
+// --- 13B. GET ALL COMMUNITY GAMES (CHRONOLOGICAL, MODERATOR BROWSER) ---
+// Lets a moderator hide a game (or issue a violation / ban its creator) proactively, without
+// needing an open report to drive them into the report-review modal first.
+moderationRoute.get("/games/all", requireAuth, async (c) => {
+	const moderatorId = c.get("user").id;
+
+	if (!(await isModerator(moderatorId))) {
+		return c.json({ success: false, code: "FORBIDDEN_INSUFFICIENT_PERMISSIONS" }, 403);
+	}
+
+	const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 200);
+	const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+
+	try {
+		const allGames = await database
+			.select({
+				id: communityGame.id,
+				userId: communityGame.userId,
+				username: users.username,
+				displayName: users.displayName,
+				avatarUrl: users.avatarUrl,
+				title: communityGame.title,
+				description: communityGame.description,
+				likesCount: communityGame.likesCount,
+				isModerated: communityGame.isModerated,
+				isAiGenerated: communityGame.isAiGenerated,
+				createdAt: communityGame.createdAt
+			})
+			.from(communityGame)
+			.innerJoin(users, eq(communityGame.userId, users.userId))
+			.orderBy(desc(communityGame.createdAt))
+			.limit(limit)
+			.offset(offset);
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			games: allGames,
+			hasMore: allGames.length === limit
+		});
+	} catch (error) {
+		console.error("Failed to fetch all community games:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
 // --- 14. GET ALL ACCOUNTS (CHRONOLOGICAL, MODERATOR BROWSER) ---
 moderationRoute.get("/accounts/all", requireAuth, async (c) => {
 	const moderatorId = c.get("user").id;
@@ -696,6 +1141,7 @@ moderationRoute.get("/accounts/all", requireAuth, async (c) => {
 				displayName: users.displayName,
 				avatarUrl: users.avatarUrl,
 				email: users.email,
+				emailVerified: users.emailVerified,
 				countryCode: users.countryCode,
 				createdAt: users.createdAt,
 				bannedUntil: accountModerationStatus.bannedUntil,

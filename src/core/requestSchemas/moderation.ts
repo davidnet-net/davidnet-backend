@@ -17,7 +17,9 @@ export const getReportsQuerySchema = type({
 });
 
 export const banUserSchema = type({
-	bannedUntil: "string | null"
+	bannedUntil: "string | null",
+	"violationId?": "string",
+	"reason?": "string"
 });
 
 export const createViolationSchema = type({
@@ -28,6 +30,15 @@ export const createViolationSchema = type({
 	"moderatorReason?": "string"
 });
 
+export const editViolationSchema = type({
+	"reason?": "string",
+	"moderatorReason?": "string | null"
+});
+
 export const moderateShortSchema = type({
 	isModerated: "boolean"
+});
+
+export const banIpSchema = type({
+	"reason?": "string"
 });

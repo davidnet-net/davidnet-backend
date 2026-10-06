@@ -4,9 +4,11 @@ import { verify } from "hono/jwt";
 
 import { database } from "../core/database/client";
 import { legalRepoSync, userLegalAcceptances } from "../core/database/schema/legal";
+import type { Env as MetadataEnv } from "./metadata";
+import { upsertUserIp } from "../core/shared/userIpLog";
 
 export type Env = {
-	Variables: {
+	Variables: MetadataEnv["Variables"] & {
 		user: {
 			id: string;
 			jwtID: string;
@@ -51,6 +53,8 @@ export const requireAuth = createMiddleware<Env>(async (c, next) => {
 			id: userID,
 			jwtID
 		});
+
+		void upsertUserIp(userID, c.get("metadata"));
 	} catch {
 		return c.json({ success: false, code: "INVALID_TOKEN" }, 401);
 	}

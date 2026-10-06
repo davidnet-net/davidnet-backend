@@ -1487,6 +1487,12 @@ communityGamesRoute.patch("/:id/moderate", requireAuth, async (c) => {
 
 		if (!updatedGame) return c.json({ success: false, code: "NOT_FOUND" }, 404);
 
+		void notifyActivity("🎮 Community game moderated", moderatorId, {
+			"Game ID": updatedGame.id,
+			"Owner ID": updatedGame.userId,
+			Hidden: body.isModerated ? "Yes" : "No"
+		});
+
 		return c.json({ success: true, code: "GAME_MODERATED", game: updatedGame });
 	} catch (error) {
 		console.error("Failed to moderate game:", error);
