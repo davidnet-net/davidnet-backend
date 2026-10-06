@@ -14,7 +14,8 @@ import {
 	communityGame,
 	banEvents,
 	userIpLog,
-	bannedIps
+	bannedIps,
+	signupStatus
 } from "../../core/database/schema/schema";
 import {
 	createReportSchema,
@@ -1141,7 +1142,7 @@ moderationRoute.get("/accounts/all", requireAuth, async (c) => {
 				displayName: users.displayName,
 				avatarUrl: users.avatarUrl,
 				email: users.email,
-				emailVerified: users.emailVerified,
+				emailVerified: signupStatus.emailVerified,
 				countryCode: users.countryCode,
 				createdAt: users.createdAt,
 				bannedUntil: accountModerationStatus.bannedUntil,
@@ -1153,6 +1154,7 @@ moderationRoute.get("/accounts/all", requireAuth, async (c) => {
 			.from(users)
 			.leftJoin(accountModerationStatus, eq(users.userId, accountModerationStatus.userId))
 			.leftJoin(internalAccess, eq(users.userId, internalAccess.userId))
+			.leftJoin(signupStatus, eq(users.userId, signupStatus.userId))
 			.orderBy(desc(users.createdAt))
 			.limit(limit)
 			.offset(offset);
