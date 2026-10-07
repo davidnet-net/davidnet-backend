@@ -27,7 +27,7 @@ export async function notifyActivity(
 			.filter(([, value]) => value !== undefined && value !== null && value !== "")
 			.map(([name, value]) => ({ name, value: String(value), inline: true }));
 
-		await fetch(webhookUrl, {
+		const response = await fetch(webhookUrl, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -42,6 +42,18 @@ export async function notifyActivity(
 				]
 			})
 		});
+
+		// fetch only rejects on network failure - a bad/revoked webhook token comes back as a
+		// normal 2xx-less HTTP response, so without this check a dead webhook fails silently.
+		if (!response.ok) {
+			console.error(
+				`[ActivityWebhook]: Discord rejected "${event}" (${response.status}):`,
+				await response.text()
+			);
+			return;
+		}
+
+		console.log(`[ActivityWebhook]: Sent "${event}" for ${actorLabel}`);
 	} catch (error) {
 		console.error("[ActivityWebhook]: Failed to send Discord notification:", error);
 	}

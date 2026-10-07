@@ -154,6 +154,13 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 			})
 			.returning();
 
+		void notifyActivity(
+			"🚩 Report submitted",
+			reporterId,
+			{ Type: reportType, Reason: reason.trim() },
+			actualReportedUserId
+		);
+
 		return c.json(
 			{
 				success: true,
