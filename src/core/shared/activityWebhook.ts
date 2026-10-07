@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 import { database } from "../database/client";
 import { users } from "../database/schema/schema";
@@ -6,26 +6,42 @@ import { users } from "../database/schema/schema";
 // Fire-and-forget activity feed for the team Discord - lets moderators/devs see content and
 // account churn as it happens without having to poll the moderation screens. Never throws: a
 // misconfigured or unreachable webhook must not break the request that triggered it.
+//
+// `targetUserId` is who the action was done TO (e.g. the banned user, the owner of moderated
+// content) when that's someone other than the actor - resolved to a readable @username/display
+// name the same way the actor is, instead of callers passing a raw userId as a plain field.
 export async function notifyActivity(
 	event: string,
-	userId: string,
-	fields: Record<string, string | null | undefined> = {}
+	actorUserId: string,
+	fields: Record<string, string | null | undefined> = {},
+	targetUserId?: string
 ) {
 	const webhookUrl = Bun.env.DISCORD_ACTIVITY_WEBHOOK_URL;
 	if (!webhookUrl) return;
 
 	try {
-		const [actor] = await database
-			.select({ username: users.username, displayName: users.displayName })
-			.from(users)
-			.where(eq(users.userId, userId))
-			.limit(1);
+		const hasDistinctTarget = Boolean(targetUserId && targetUserId !== actorUserId);
+		const idsToResolve = hasDistinctTarget ? [actorUserId, targetUserId!] : [actorUserId];
 
-		const actorLabel = actor ? `@${actor.username} (${actor.displayName})` : userId;
+		const resolved = await database
+			.select({ userId: users.userId, username: users.username, displayName: users.displayName })
+			.from(users)
+			.where(inArray(users.userId, idsToResolve));
+
+		const labelFor = (id: string) => {
+			const match = resolved.find((u) => u.userId === id);
+			return match ? `@${match.username} (${match.displayName})` : id;
+		};
+
+		const actorLabel = labelFor(actorUserId);
 
 		const embedFields = Object.entries(fields)
 			.filter(([, value]) => value !== undefined && value !== null && value !== "")
 			.map(([name, value]) => ({ name, value: String(value), inline: true }));
+
+		if (hasDistinctTarget) {
+			embedFields.unshift({ name: "Target", value: labelFor(targetUserId!), inline: true });
+		}
 
 		const response = await fetch(webhookUrl, {
 			method: "POST",

@@ -11,6 +11,7 @@ import {
 	blockIdSchema
 } from "../../core/requestSchemas/connections";
 import { userConnections, userBlocks } from "../../core/database/schema/connections";
+import { notifyActivity } from "../../core/shared/activityWebhook";
 
 export const connections = new Hono<Env>();
 
@@ -255,6 +256,7 @@ connections.post(
 					})
 					.where(eq(userConnections.id, conn.id));
 
+				void notifyActivity("🤝 Connection request sent", userID, {}, requestedUserID);
 				return c.json({ code: "success", success: true, message: "Connection request sent" });
 			}
 		}
@@ -265,6 +267,7 @@ connections.post(
 			status: "pending"
 		});
 
+		void notifyActivity("🤝 Connection request sent", userID, {}, requestedUserID);
 		return c.json({ code: "success", success: true, message: "Connection request sent" });
 	}
 );
@@ -305,6 +308,7 @@ connections.post(
 			);
 		}
 
+		void notifyActivity("🤝 Connection accepted", userID, {}, requestedUserID);
 		return c.json({ code: "success", success: true, message: "Connection accepted" });
 	}
 );
@@ -345,6 +349,7 @@ connections.post(
 			);
 		}
 
+		void notifyActivity("🚫 Connection rejected", userID, {}, requestedUserID);
 		return c.json({ code: "success", success: true, message: "Connection rejected" });
 	}
 );
@@ -387,6 +392,7 @@ connections.post(
 			);
 		}
 
+		void notifyActivity("💔 Connection removed", userID, {}, requestedUserID);
 		return c.json({ code: "success", success: true, message: "Connection removed" });
 	}
 );
@@ -424,6 +430,7 @@ connections.post("/block", requireAuth, sValidator("json", requestedUserSchema),
 			)
 		);
 
+	void notifyActivity("⛔ User blocked", userID, {}, requestedUserID);
 	return c.json({ code: "success", success: true, message: "User blocked" });
 });
 
@@ -440,5 +447,6 @@ connections.post("/unblock", requireAuth, sValidator("json", requestedUserSchema
 		.delete(userBlocks)
 		.where(and(eq(userBlocks.userId, userID), eq(userBlocks.blockedId, requestedUserID)));
 
+	void notifyActivity("✅ User unblocked", userID, {}, requestedUserID);
 	return c.json({ code: "success", success: true, message: "User unblocked" });
 });

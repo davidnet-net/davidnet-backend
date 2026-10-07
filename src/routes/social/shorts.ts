@@ -467,11 +467,12 @@ shortsRoute.patch("/:id/moderate", requireAuth, async (c) => {
 
 		if (!updatedShort) return c.json({ success: false, code: "NOT_FOUND" }, 404);
 
-		void notifyActivity("📹 Short moderated", moderatorId, {
-			"Short ID": updatedShort.id,
-			"Owner ID": updatedShort.userId,
-			Hidden: body.isModerated ? "Yes" : "No"
-		});
+		void notifyActivity(
+			"📹 Short moderated",
+			moderatorId,
+			{ "Short ID": updatedShort.id, Hidden: body.isModerated ? "Yes" : "No" },
+			updatedShort.userId
+		);
 
 		return c.json({ success: true, short: updatedShort });
 	} catch (error) {

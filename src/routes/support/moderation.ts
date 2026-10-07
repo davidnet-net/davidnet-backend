@@ -439,11 +439,12 @@ moderationRoute.post("/violations", requireAuth, async (c) => {
 			})
 			.returning();
 
-		void notifyActivity("⚠️ Violation issued", moderatorId, {
-			"Violation ID": newViolation.id,
-			"Target User ID": userId,
-			Type: reportedType
-		});
+		void notifyActivity(
+			"⚠️ Violation issued",
+			moderatorId,
+			{ "Violation ID": newViolation.id, Type: reportedType },
+			userId
+		);
 
 		return c.json(
 			{
@@ -522,10 +523,12 @@ moderationRoute.patch("/violations/:id", requireAuth, async (c) => {
 			.where(eq(violations.id, violationId))
 			.returning();
 
-		void notifyActivity("✏️ Violation edited", moderatorId, {
-			"Violation ID": violationId,
-			"Target User ID": existing.userId
-		});
+		void notifyActivity(
+			"✏️ Violation edited",
+			moderatorId,
+			{ "Violation ID": violationId },
+			existing.userId
+		);
 
 		return c.json({ success: true, code: "VIOLATION_UPDATED", violation: updatedViolation });
 	} catch (error) {
@@ -557,10 +560,12 @@ moderationRoute.delete("/violations/:id", requireAuth, async (c) => {
 
 		await database.delete(violations).where(eq(violations.id, violationId));
 
-		void notifyActivity("🗑️ Violation deleted", moderatorId, {
-			"Violation ID": violationId,
-			"Target User ID": existing.userId
-		});
+		void notifyActivity(
+			"🗑️ Violation deleted",
+			moderatorId,
+			{ "Violation ID": violationId },
+			existing.userId
+		);
 
 		return c.json({ success: true, code: "VIOLATION_DELETED" });
 	} catch (error) {
@@ -687,12 +692,16 @@ moderationRoute.patch("/users/:userId/ban", requireAuth, async (c) => {
 			return status;
 		});
 
-		void notifyActivity(bannedDate ? "🔨 User banned" : "✅ User unbanned", moderatorId, {
-			"Target User ID": targetUserId,
-			"Banned Until": bannedDate ? bannedDate.toISOString() : null,
-			Reason: resolvedReason,
-			"Violation ID": resolvedViolationId
-		});
+		void notifyActivity(
+			bannedDate ? "🔨 User banned" : "✅ User unbanned",
+			moderatorId,
+			{
+				"Banned Until": bannedDate ? bannedDate.toISOString() : null,
+				Reason: resolvedReason,
+				"Violation ID": resolvedViolationId
+			},
+			targetUserId
+		);
 
 		return c.json({
 			success: true,
