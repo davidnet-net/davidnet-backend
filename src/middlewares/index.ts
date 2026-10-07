@@ -14,5 +14,5 @@ export async function registerMiddlewares(app: Hono) {
 	app.use(createMetadata);
 	app.use(ipBanGuard);
 	app.use(sanitizeUnicode);
-	app.use(createRateLimiter(1000, 15 * 60 * 1000));
+	app.use(createRateLimiter(10000, 15 * 60 * 1000));
 }
