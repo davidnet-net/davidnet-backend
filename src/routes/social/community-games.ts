@@ -19,7 +19,7 @@ import {
 	internalAccess,
 	users
 } from "../../core/database/schema/schema";
-import { notifyActivity } from "../../core/shared/activityWebhook";
+import { notifyActivity, contentUrlFor } from "../../core/shared/activityWebhook";
 import {
 	deleteFromBucket,
 	getFromBucket,
@@ -908,10 +908,13 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 			);
 		}
 
-		void notifyActivity("🎮 Community game created", userId, {
-			"Game ID": newGame.id,
-			Title: newGame.title
-		});
+		void notifyActivity(
+			"🎮 Community game created",
+			userId,
+			{ "Game ID": newGame.id, Title: newGame.title },
+			undefined,
+			contentUrlFor("game", newGame.id)
+		);
 
 		return c.json({ success: true, code: "GAME_UPLOADED", game: newGame });
 	} catch (error) {
@@ -1123,9 +1126,13 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
 
 		await database.update(communityGame).set(updateValues).where(eq(communityGame.id, gameId));
 
-		void notifyActivity("🎮 Community game updated", userId, {
-			"Game ID": gameId
-		});
+		void notifyActivity(
+			"🎮 Community game updated",
+			userId,
+			{ "Game ID": gameId },
+			undefined,
+			contentUrlFor("game", gameId)
+		);
 
 		return c.json({ success: true, code: "GAME_UPDATED" });
 	} catch (error) {
@@ -1409,7 +1416,8 @@ communityGamesRoute.patch("/:id/moderate", requireAuth, async (c) => {
 			"🎮 Community game moderated",
 			moderatorId,
 			{ "Game ID": updatedGame.id, Hidden: body.isModerated ? "Yes" : "No" },
-			updatedGame.userId
+			updatedGame.userId,
+			contentUrlFor("game", updatedGame.id)
 		);
 
 		return c.json({ success: true, code: "GAME_MODERATED", game: updatedGame });

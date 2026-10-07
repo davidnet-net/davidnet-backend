@@ -3,6 +3,21 @@ import { eq, inArray } from "drizzle-orm";
 import { database } from "../database/client";
 import { users } from "../database/schema/schema";
 
+const PROFILE_BASE_URL = "https://account.davidnet.net/profile";
+
+// Shared with callers so a report/violation's "Content" link always points at the same place
+// the content's own creation/moderation events do, instead of each call site guessing a URL.
+export function contentUrlFor(type: "short" | "game" | "profile", id: string): string | undefined {
+	switch (type) {
+		case "short":
+			return `https://social.davidnet.net/shorts/${id}`;
+		case "game":
+			return `https://home.davidnet.net/games/community/player/${id}`;
+		default:
+			return undefined;
+	}
+}
+
 // Fire-and-forget activity feed for the team Discord - lets moderators/devs see content and
 // account churn as it happens without having to poll the moderation screens. Never throws: a
 // misconfigured or unreachable webhook must not break the request that triggered it.
@@ -10,11 +25,14 @@ import { users } from "../database/schema/schema";
 // `targetUserId` is who the action was done TO (e.g. the banned user, the owner of moderated
 // content) when that's someone other than the actor - resolved to a readable @username/display
 // name the same way the actor is, instead of callers passing a raw userId as a plain field.
+// `contentUrl` links the embed title at whatever was created/modified (a short, a community
+// game, ...) when the event has a single clear piece of content behind it.
 export async function notifyActivity(
 	event: string,
 	actorUserId: string,
 	fields: Record<string, string | null | undefined> = {},
-	targetUserId?: string
+	targetUserId?: string,
+	contentUrl?: string
 ) {
 	const webhookUrl = Bun.env.DISCORD_ACTIVITY_WEBHOOK_URL;
 	if (!webhookUrl) return;
@@ -28,9 +46,12 @@ export async function notifyActivity(
 			.from(users)
 			.where(inArray(users.userId, idsToResolve));
 
+		// Every mention of a user in the embed links straight to their profile, so moderators can
+		// jump from the Discord feed to the account without copy-pasting a username anywhere.
 		const labelFor = (id: string) => {
 			const match = resolved.find((u) => u.userId === id);
-			return match ? `@${match.username} (${match.displayName})` : id;
+			if (!match) return id;
+			return `[@${match.username} (${match.displayName})](${PROFILE_BASE_URL}/${match.username})`;
 		};
 
 		const actorLabel = labelFor(actorUserId);
@@ -50,6 +71,7 @@ export async function notifyActivity(
 				embeds: [
 					{
 						title: event,
+						url: contentUrl,
 						description: `By **${actorLabel}**`,
 						color: 0x5865f2,
 						fields: embedFields,

@@ -27,7 +27,7 @@ import {
 } from "../../core/requestSchemas/moderation";
 import { collectAuth } from "../../middlewares/collectAuth";
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
-import { notifyActivity } from "../../core/shared/activityWebhook";
+import { notifyActivity, contentUrlFor } from "../../core/shared/activityWebhook";
 
 export const moderationRoute = new Hono<Env>();
 
@@ -158,7 +158,8 @@ moderationRoute.post("/report", requireAuth, async (c) => {
 			"🚩 Report submitted",
 			reporterId,
 			{ Type: reportType, Reason: reason.trim() },
-			actualReportedUserId
+			actualReportedUserId,
+			contentUrlFor(reportType, resolvedReportedId)
 		);
 
 		return c.json(
@@ -443,7 +444,8 @@ moderationRoute.post("/violations", requireAuth, async (c) => {
 			"⚠️ Violation issued",
 			moderatorId,
 			{ "Violation ID": newViolation.id, Type: reportedType },
-			userId
+			userId,
+			contentUrlFor(reportedType, reportedId)
 		);
 
 		return c.json(
@@ -527,7 +529,8 @@ moderationRoute.patch("/violations/:id", requireAuth, async (c) => {
 			"✏️ Violation edited",
 			moderatorId,
 			{ "Violation ID": violationId },
-			existing.userId
+			existing.userId,
+			contentUrlFor(existing.reportedType, existing.reportedId)
 		);
 
 		return c.json({ success: true, code: "VIOLATION_UPDATED", violation: updatedViolation });

@@ -16,7 +16,7 @@ import {
 import { requireAuth, type Env } from "../../middlewares/requireAuth";
 import { collectAuth } from "../../middlewares/collectAuth";
 import { uploadToBucket, getFromBucket } from "../../core/shared/s3";
-import { notifyActivity } from "../../core/shared/activityWebhook";
+import { notifyActivity, contentUrlFor } from "../../core/shared/activityWebhook";
 
 export const shortsRoute = new Hono<Env>();
 
@@ -142,10 +142,13 @@ shortsRoute.post("/", requireAuth, async (c) => {
 			})
 			.returning();
 
-		void notifyActivity("📹 Short created", userId, {
-			"Short ID": newShort.id,
-			Title: trimmedTitle
-		});
+		void notifyActivity(
+			"📹 Short created",
+			userId,
+			{ "Short ID": newShort.id, Title: trimmedTitle },
+			undefined,
+			contentUrlFor("short", newShort.id)
+		);
 
 		return c.json({
 			success: true,
@@ -471,7 +474,8 @@ shortsRoute.patch("/:id/moderate", requireAuth, async (c) => {
 			"📹 Short moderated",
 			moderatorId,
 			{ "Short ID": updatedShort.id, Hidden: body.isModerated ? "Yes" : "No" },
-			updatedShort.userId
+			updatedShort.userId,
+			contentUrlFor("short", updatedShort.id)
 		);
 
 		return c.json({ success: true, short: updatedShort });
