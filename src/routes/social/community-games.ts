@@ -1,6 +1,6 @@
 import AdmZip from "adm-zip";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 
 import { database } from "../../core/database/client";
@@ -10,13 +10,16 @@ import {
 	communityGameAchievements,
 	communityGameAuditLog,
 	communityGameHighscores,
+	communityGameLevels,
 	communityGameLikes,
 	communityGameSaves,
 	communityGameSessions,
 	DEFAULT_LEADERBOARD_CATEGORY,
+	DEFAULT_SAVE_SLOT,
 	internalAccess,
 	users
 } from "../../core/database/schema/schema";
+import { notifyActivity } from "../../core/shared/activityWebhook";
 import {
 	deleteFromBucket,
 	getFromBucket,
@@ -24,7 +27,6 @@ import {
 	uploadToBucket
 } from "../../core/shared/s3";
 import { type Env, requireAuth } from "../../middlewares/requireAuth";
-import { notifyActivity } from "../../core/shared/activityWebhook";
 
 export const communityGamesRoute = new Hono<Env>();
 
@@ -52,12 +54,34 @@ function sanitizeCategory(raw: unknown): string | null {
 	return raw;
 }
 
+// --- NAMED SAVE SLOTS ---
+// A game can keep more than one save blob per player under any number of named slots (e.g.
+// "hardcore", "slot-2"). Omitting a slot (every game uploaded before this feature existed, and any
+// new game that doesn't bother) falls back to DEFAULT_SAVE_SLOT, reproducing the old
+// single-save-per-player behavior exactly. Reuses the same charset rules as highscore categories.
+function sanitizeSlot(raw: unknown): string | null {
+	if (raw === undefined || raw === null || raw === "") return DEFAULT_SAVE_SLOT;
+	if (typeof raw !== "string") return null;
+	if (raw.length > MAX_CATEGORY_LENGTH || !CATEGORY_PATTERN.test(raw)) return null;
+	return raw;
+}
+
 // --- ACHIEVEMENTS ---
 const MAX_ACHIEVEMENT_ID_LENGTH = 100;
 const MAX_ACHIEVEMENT_NAME_LENGTH = 200;
 const MAX_ACHIEVEMENT_DESCRIPTION_LENGTH = 500;
 const MAX_ACHIEVEMENT_ICON_LENGTH = 32;
 const ACHIEVEMENT_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
+// Sanity ceiling for achievement progress/target, mirrors MAX_HIGHSCORE_VALUE.
+const MAX_ACHIEVEMENT_PROGRESS_VALUE = 100_000_000;
+
+// --- UGC LEVELS ---
+const MAX_LEVEL_TITLE_LENGTH = 100;
+// Generous but bounded - a level is typically bigger than a save blob but still just data.
+const MAX_LEVEL_JSON_LENGTH = 300_000;
+const MAX_LEVELS_PER_USER_PER_GAME = 200;
+const LEVELS_PAGE_SIZE_DEFAULT = 20;
+const LEVELS_PAGE_SIZE_MAX = 50;
 
 // --- ICON UPLOAD ---
 const ALLOWED_ICON_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"];
@@ -322,6 +346,421 @@ async function verifyGameSession(params: {
 	return { valid: true };
 }
 
+// --- INJECT THE DAVIDNET GAME SDK INTO AN index.html (and any other .html file) ---
+// Shared between the initial upload and the in-place update route - keep in sync everywhere else
+// the game's HTML is rewritten. Injects two scripts right after <head> (or at the very top if
+// there's no <head> tag): a localStorage/sessionStorage polyfill (games run in an opaque-origin
+// iframe where real storage isn't available) and window.DavidnetSDK, which bridges to the parent
+// player page via postMessage for everything that needs the player's authenticated session
+// (highscores, saves, achievements, UGC levels, realtime).
+function injectGameSdk(gameId: string, htmlContent: string): string {
+	// Safe in-memory storage mock that prevents the game from crashing.
+	const storagePolyfill = `
+                <script>
+                    (function() {
+                        try {
+                            var memStorage = {};
+                            var mockStorage = {
+                                getItem: function(k) { return memStorage.hasOwnProperty(k) ? memStorage[k] : null; },
+                                setItem: function(k, v) { memStorage[k] = String(v); },
+                                removeItem: function(k) { delete memStorage[k]; },
+                                clear: function() { memStorage = {}; },
+                                key: function(i) { return Object.keys(memStorage)[i] || null; },
+                                get length() { return Object.keys(memStorage).length; }
+                            };
+                            Object.defineProperty(window, 'localStorage', { value: mockStorage, configurable: true, writable: true });
+                            Object.defineProperty(window, 'sessionStorage', { value: mockStorage, configurable: true, writable: true });
+                        } catch(e) {
+                            console.warn("Could not polyfill storage");
+                        }
+                    })();
+                </script>
+                `;
+
+	// SDK bridge: exposes window.DavidnetSDK.{applyHighscore,getHighscores,saveJsonBlob,getJsonBlob,
+	// unlockAchievement,getAchievements,ugc.*,realtime.*} by round-tripping postMessage calls through
+	// the parent player page, which holds the authenticated session the sandboxed iframe can never
+	// access directly.
+	//
+	// Anti-cheat: a per-session secret is fetched once from the server via "startSession" and
+	// kept only in this closure (never attached to window.DavidnetSDK). applyHighscore, saveJsonBlob
+	// and unlockAchievement sign every submission with it (HMAC-SHA256), so these can only be forged
+	// by code that runs inside this exact iframe session - not by postMessage calls crafted from the
+	// parent page's own devtools console using the secret-less global SDK object. UGC levels and
+	// realtime aren't signed - they aren't anti-cheat surfaces, just authenticated player actions.
+	const gameSdkScript = `
+                <script>
+                    (function() {
+                        try {
+                            var DN_SOURCE = "davidnet-game-sdk";
+                            var GAME_ID = "${gameId}";
+                            var pending = {};
+
+                            function uid() {
+                                return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+                            }
+
+                            function call(type, payload) {
+                                return new Promise(function(resolve, reject) {
+                                    var requestId = uid();
+                                    var timeoutId = setTimeout(function() {
+                                        delete pending[requestId];
+                                        reject(new Error("DavidnetSDK: \\"" + type + "\\" timed out"));
+                                    }, 10000);
+
+                                    pending[requestId] = function(message) {
+                                        clearTimeout(timeoutId);
+                                        if (message.success) {
+                                            resolve(message.data);
+                                        } else {
+                                            reject(new Error(message.error || "DavidnetSDK: unknown error"));
+                                        }
+                                    };
+
+                                    window.parent.postMessage(
+                                        { source: DN_SOURCE, type: type, requestId: requestId, payload: payload },
+                                        "*"
+                                    );
+                                });
+                            }
+
+                            var realtimeListeners = { message: [], presence: [], matched: [], state: [], announcement: [], disconnect: [], reconnect: [], error: [] };
+
+                            function subscribe(kind, cb) {
+                                realtimeListeners[kind].push(cb);
+                                return function unsubscribe() {
+                                    var idx = realtimeListeners[kind].indexOf(cb);
+                                    if (idx !== -1) realtimeListeners[kind].splice(idx, 1);
+                                };
+                            }
+
+                            function emit(kind, payload) {
+                                var list = realtimeListeners[kind];
+                                if (!list) return;
+                                list.slice().forEach(function(cb) {
+                                    try { cb(payload); } catch (e) { console.error("DavidnetSDK: realtime listener error", e); }
+                                });
+                            }
+
+                            window.addEventListener("message", function(event) {
+                                var message = event.data;
+                                if (!message || message.source !== DN_SOURCE) return;
+
+                                if (message.type === "event") {
+                                    emit(message.event, message.payload);
+                                    return;
+                                }
+
+                                if (!message.requestId) return;
+                                var handler = pending[message.requestId];
+                                if (!handler) return;
+                                delete pending[message.requestId];
+                                handler(message);
+                            });
+
+                            function hexFromBuffer(buffer) {
+                                var bytes = new Uint8Array(buffer);
+                                var hex = "";
+                                for (var i = 0; i < bytes.length; i++) {
+                                    hex += bytes[i].toString(16).padStart(2, "0");
+                                }
+                                return hex;
+                            }
+
+                            function signMessage(secret, message) {
+                                var enc = new TextEncoder();
+                                return crypto.subtle
+                                    .importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+                                    .then(function(key) {
+                                        return crypto.subtle.sign("HMAC", key, enc.encode(message));
+                                    })
+                                    .then(hexFromBuffer);
+                            }
+
+                            // Fetched once per page load; the secret never leaves this closure.
+                            var sessionReady = call("startSession", {});
+
+                            window.DavidnetSDK = {
+                                // Submit a score. Server keeps the best score per-player and globally, PER
+                                // CATEGORY - pass { category: "time-attack" } to use a leaderboard other than
+                                // the default one (omit it entirely and you get the one-leaderboard-per-game
+                                // behavior games have always had).
+                                // Resolves: { score, playerHighscore, globalHighscore, isNewPersonalBest, isNewGlobalBest }
+                                applyHighscore: function(score, options) {
+                                    var category = (options && options.category) || "default";
+                                    return sessionReady.then(function(session) {
+                                        var timestamp = Date.now();
+                                        var message = session.sessionId + ":" + GAME_ID + ":" + score + ":" + timestamp;
+                                        return signMessage(session.secret, message).then(function(signature) {
+                                            return call("applyHighscore", {
+                                                score: score,
+                                                category: category,
+                                                sessionId: session.sessionId,
+                                                timestamp: timestamp,
+                                                signature: signature
+                                            });
+                                        });
+                                    });
+                                },
+                                // Pass { category: "time-attack" } to read a non-default leaderboard.
+                                // Resolves: { playerHighscore, globalHighscore, leaderboard: [{ rank, username, displayName, avatarUrl, score }] (top 10) }
+                                getHighscores: function(options) {
+                                    var category = (options && options.category) || "default";
+                                    return call("getHighscores", { category: category });
+                                },
+                                // Persist an arbitrary JSON-serializable save object (max ~1MB) in a named
+                                // save slot. Pass { slot: "hardcore" } to use a slot other than the default
+                                // one - omit it entirely and you get the classic one-save-per-player
+                                // behavior, fully backwards compatible with every game uploaded before
+                                // slots existed. Resolves: { savedAt }
+                                saveJsonBlob: function(data, options) {
+                                    var slot = (options && options.slot) || "default";
+                                    return sessionReady.then(function(session) {
+                                        var serialized = JSON.stringify(data);
+                                        var timestamp = Date.now();
+                                        var enc = new TextEncoder();
+                                        return crypto.subtle.digest("SHA-256", enc.encode(serialized))
+                                            .then(hexFromBuffer)
+                                            .then(function(dataHash) {
+                                                var message = session.sessionId + ":" + GAME_ID + ":" + dataHash + ":" + timestamp;
+                                                return signMessage(session.secret, message).then(function(signature) {
+                                                    return call("saveJsonBlob", {
+                                                        data: data,
+                                                        slot: slot,
+                                                        sessionId: session.sessionId,
+                                                        timestamp: timestamp,
+                                                        signature: signature
+                                                    });
+                                                });
+                                            });
+                                    });
+                                },
+                                // Pass { slot: "hardcore" } to read a non-default save slot.
+                                // Resolves: { data, updatedAt } — data is null if nothing was saved in that slot yet.
+                                getJsonBlob: function(options) {
+                                    var slot = (options && options.slot) || "default";
+                                    return call("getJsonBlob", { slot: slot });
+                                },
+
+                                // Unlock (or advance) an achievement for the current player. achievement is
+                                // { id, name, description?, icon?, progress?, target? } - "id" is a stable
+                                // string you choose (unique within your game, not globally).
+                                //
+                                // Without progress/target: classic instant unlock - first call wins, repeat
+                                // calls are cheap no-ops, name/description/icon don't change after the first
+                                // call. Safe to call every time the unlock condition is true.
+                                //
+                                // With progress + target (both positive integers): tracks a progress bar
+                                // instead of unlocking instantly - call this every time progress changes
+                                // (e.g. "12 of 50 enemies defeated"). The server remembers the HIGHEST
+                                // progress seen; "isNew" only flips true the moment progress reaches target
+                                // (the achievement completes), after which it's immutable like a classic
+                                // achievement. getAchievements() includes in-progress achievements too
+                                // (unlockedAt: null) so you can rebuild a progress bar on load.
+                                // Resolves: { isNew, achievement: { id, name, description, icon, progress, target, unlockedAt } }
+                                unlockAchievement: function(achievement) {
+                                    achievement = achievement || {};
+                                    var id = String(achievement.id || "");
+                                    var name = String(achievement.name || id);
+                                    var description = achievement.description != null ? String(achievement.description) : null;
+                                    var icon = achievement.icon != null ? String(achievement.icon) : null;
+                                    var progress = achievement.progress != null ? Number(achievement.progress) : null;
+                                    var target = achievement.target != null ? Number(achievement.target) : null;
+                                    return sessionReady.then(function(session) {
+                                        var serialized = JSON.stringify({ id: id, name: name, description: description, icon: icon, progress: progress, target: target });
+                                        var timestamp = Date.now();
+                                        var enc = new TextEncoder();
+                                        return crypto.subtle.digest("SHA-256", enc.encode(serialized))
+                                            .then(hexFromBuffer)
+                                            .then(function(dataHash) {
+                                                var message = session.sessionId + ":" + GAME_ID + ":" + dataHash + ":" + timestamp;
+                                                return signMessage(session.secret, message).then(function(signature) {
+                                                    return call("unlockAchievement", {
+                                                        id: id,
+                                                        name: name,
+                                                        description: description,
+                                                        icon: icon,
+                                                        progress: progress,
+                                                        target: target,
+                                                        sessionId: session.sessionId,
+                                                        timestamp: timestamp,
+                                                        signature: signature
+                                                    });
+                                                });
+                                            });
+                                    });
+                                },
+                                // Resolves: { achievements: [{ id, name, description, icon, progress, target,
+                                // unlockedAt, unlockedPercentage }] } — every achievement this player has
+                                // unlocked OR made progress on in THIS game. unlockedAt is null for an
+                                // in-progress (not yet completed) achievement. unlockedPercentage (0-100) is
+                                // the share of players who have fully unlocked that achievement id, handy
+                                // for a rarity badge ("3% of players have this").
+                                getAchievements: function() {
+                                    return call("getAchievements", {});
+                                },
+
+                                // Community/UGC levels: a generic level-upload system. Level data is an
+                                // opaque JSON blob - the platform never looks inside it, so it works for any
+                                // level/map/track format your game defines. Levels are public once
+                                // published: any player can list and download them, same trust model as the
+                                // rest of this sandboxed game (your game decides what to publish).
+                                ugc: {
+                                    // Publishes a new level, or - if you pass the "id" of a level you own -
+                                    // overwrites it in place (e.g. after the player edits it further).
+                                    // Resolves: { id, title, createdAt, updatedAt }
+                                    publishLevel: function(level) {
+                                        level = level || {};
+                                        return call("ugcPublishLevel", {
+                                            id: level.id || undefined,
+                                            title: String(level.title || ""),
+                                            data: level.data
+                                        });
+                                    },
+                                    // Lists published levels for this game, newest first. Pass { mine: true }
+                                    // to list only your own, { limit, offset } to page through them (limit
+                                    // defaults to 20, max 50). Does NOT include the level data itself - call
+                                    // getLevel once the player picks one.
+                                    // Resolves: { levels: [{ id, title, creator, creatorDisplayName, createdAt, updatedAt }], hasMore }
+                                    listLevels: function(options) {
+                                        options = options || {};
+                                        return call("ugcListLevels", {
+                                            mine: !!options.mine,
+                                            limit: options.limit,
+                                            offset: options.offset
+                                        });
+                                    },
+                                    // Resolves: { id, title, data, creator, creatorDisplayName, createdAt, updatedAt }
+                                    getLevel: function(id) {
+                                        return call("ugcGetLevel", { id: String(id || "") });
+                                    },
+                                    // Deletes a level you published (or any level, if you're the game's
+                                    // creator). Resolves: { id }
+                                    deleteLevel: function(id) {
+                                        return call("ugcDeleteLevel", { id: String(id || "") });
+                                    }
+                                },
+
+                                // Generic real-time extension: rooms (pub/sub channels with presence), a
+                                // matchmaking queue, a per-room state channel, and a lobby-wide announcement
+                                // channel. Content-agnostic - the platform never inspects "data"/"value", so
+                                // the same primitives work for a 2-player board game, a 50+ player shooter,
+                                // or a one-way live feed (e.g. a price ticker) with no "match" concept at
+                                // all. There is no maximum room size, queue size, or group size.
+                                realtime: {
+                                    // Opens the realtime connection. Called automatically by every other
+                                    // realtime.* method, so you only need this if you want to connect early.
+                                    connect: function() {
+                                        return call("realtimeConnect", {});
+                                    },
+                                    // Joins a named room (created on first join, destroyed when empty). You
+                                    // can join any number of rooms. Resolves: { room, members, state } -
+                                    // members is everyone already in the room, state is a snapshot of every
+                                    // key/value set in this room so far via setState (see below).
+                                    joinRoom: function(room) {
+                                        return call("realtimeJoinRoom", { room: room });
+                                    },
+                                    // Resolves: { room }
+                                    leaveRoom: function(room) {
+                                        return call("realtimeLeaveRoom", { room: room });
+                                    },
+                                    // Checks how many members are currently in a room WITHOUT joining it -
+                                    // e.g. to show "3/8 players" on a lobby list before committing to join.
+                                    // Resolves: { room, memberCount, members }
+                                    getRoomInfo: function(room) {
+                                        return call("realtimeRoomInfo", { room: room });
+                                    },
+                                    // Broadcasts arbitrary JSON-serializable data to everyone else currently in
+                                    // the room (pass { echo: true } to also receive your own message back via
+                                    // onMessage). Fire-and-forget - does not wait for delivery.
+                                    send: function(room, data, options) {
+                                        return call("realtimeSend", {
+                                            room: room,
+                                            data: data,
+                                            echo: !!(options && options.echo)
+                                        });
+                                    },
+                                    // Sets a named key's value for everyone in the room: the server remembers
+                                    // the LATEST value per key and hands the full set back as "state" to
+                                    // anyone who joins afterwards (see joinRoom), plus pushes a live "state"
+                                    // event to everyone else already in the room. Useful for anything a late
+                                    // joiner needs to catch up on - player positions, ready/not-ready status,
+                                    // a shared scoreboard - in any realtime game, not just shooters. You must
+                                    // be joined to the room first. Resolves: { room, key }
+                                    setState: function(room, key, value) {
+                                        return call("realtimeSetState", { room: room, key: key, value: value });
+                                    },
+                                    // Joins a named matchmaking queue. All callers joining the same queue name
+                                    // should agree on the same groupSize. Once "groupSize" callers are waiting,
+                                    // the server pops them off (FIFO) and auto-creates a room for them - listen
+                                    // with onMatched. "metadata" is optional and yours to use (e.g. skill level)
+                                    // for your own custom matching logic built on top of this primitive.
+                                    // Resolves: { queue, position }
+                                    joinQueue: function(queue, groupSize, metadata) {
+                                        return call("realtimeJoinQueue", {
+                                            queue: queue,
+                                            groupSize: groupSize,
+                                            metadata: metadata
+                                        });
+                                    },
+                                    // Resolves: { queue }
+                                    leaveQueue: function(queue) {
+                                        return call("realtimeLeaveQueue", { queue: queue });
+                                    },
+                                    // Checks how many players are currently waiting in a queue WITHOUT
+                                    // joining it - e.g. to show "waiting for 2 more players" up front.
+                                    // Resolves: { queue, waiting }
+                                    getQueueInfo: function(queue) {
+                                        return call("realtimeQueueInfo", { queue: queue });
+                                    },
+                                    // Broadcasts to EVERY player currently connected to this game's lobby,
+                                    // not just a specific room - for server-wide-feeling announcements (e.g.
+                                    // "Player X just beat the boss!") independent of whatever room each
+                                    // player is in. Pass { echo: true } to also receive your own announcement
+                                    // back. Fire-and-forget - does not wait for delivery. Resolves: {}
+                                    announce: function(data, options) {
+                                        return call("realtimeAnnounce", {
+                                            data: data,
+                                            echo: !!(options && options.echo)
+                                        });
+                                    },
+                                    // Fires for every message sent to a room you're in: { room, data, from, ts }.
+                                    // Returns an unsubscribe function.
+                                    onMessage: function(cb) { return subscribe("message", cb); },
+                                    // Fires when someone joins/leaves a room you're in: { room, event, member }.
+                                    onPresence: function(cb) { return subscribe("presence", cb); },
+                                    // Fires when anyone (including you) calls setState in a room you're in:
+                                    // { room, key, value, from }.
+                                    onState: function(cb) { return subscribe("state", cb); },
+                                    // Fires for every lobby-wide announcement from any connected player of
+                                    // this game: { data, from, ts }.
+                                    onAnnouncement: function(cb) { return subscribe("announcement", cb); },
+                                    // Fires when a queue you joined found a full group: { queue, room, members }.
+                                    onMatched: function(cb) { return subscribe("matched", cb); },
+                                    // Fires when the realtime connection drops unexpectedly (auto-reconnect is
+                                    // attempted in the background; your room memberships are silently restored).
+                                    onDisconnect: function(cb) { return subscribe("disconnect", cb); },
+                                    // Fires after a successful auto-reconnect, with the rooms that were rejoined.
+                                    onReconnect: function(cb) { return subscribe("reconnect", cb); },
+                                    // Fires on a server-side error that isn't tied to a specific call, e.g. you
+                                    // got rate-limited or sent to a room you're not in: { code, message }.
+                                    onError: function(cb) { return subscribe("error", cb); }
+                                }
+                            };
+                        } catch(e) {
+                            console.warn("Could not initialize DavidnetSDK", e);
+                        }
+                    })();
+                </script>
+                `;
+
+	// Plaats de scripts direct na de <head> tag of helemaal bovenaan
+	if (htmlContent.toLowerCase().includes("<head>")) {
+		return htmlContent.replace(/<head>/i, "<head>\n" + storagePolyfill + gameSdkScript);
+	}
+	return storagePolyfill + gameSdkScript + htmlContent;
+}
+
 // --- 1. UPLOAD COMMUNITY GAME ---
 communityGamesRoute.post("/upload", requireAuth, async (c) => {
 	const userId = c.get("user").id;
@@ -423,311 +862,7 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 			// Inject LocalStorage Polyfill into HTML files
 			if (filePath.endsWith(".html")) {
 				contentType = "text/html";
-
-				let htmlContent = fileData.toString("utf-8");
-
-				// Safe in-memory storage mock that prevents the game from crashing
-				const storagePolyfill = `
-                <script>
-                    (function() {
-                        try {
-                            var memStorage = {};
-                            var mockStorage = {
-                                getItem: function(k) { return memStorage.hasOwnProperty(k) ? memStorage[k] : null; },
-                                setItem: function(k, v) { memStorage[k] = String(v); },
-                                removeItem: function(k) { delete memStorage[k]; },
-                                clear: function() { memStorage = {}; },
-                                key: function(i) { return Object.keys(memStorage)[i] || null; },
-                                get length() { return Object.keys(memStorage).length; }
-                            };
-                            Object.defineProperty(window, 'localStorage', { value: mockStorage, configurable: true, writable: true });
-                            Object.defineProperty(window, 'sessionStorage', { value: mockStorage, configurable: true, writable: true });
-                        } catch(e) {
-                            console.warn("Could not polyfill storage");
-                        }
-                    })();
-                </script>
-                `;
-
-				// SDK bridge: exposes window.DavidnetSDK.{applyHighscore,getHighscores,saveJsonBlob,getJsonBlob}
-				// by round-tripping postMessage calls through the parent player page, which holds the
-				// authenticated session the sandboxed iframe can never access directly.
-				//
-				// Anti-cheat: a per-session secret is fetched once from the server via "startSession" and
-				// kept only in this closure (never attached to window.DavidnetSDK). applyHighscore signs
-				// every submission with it (HMAC-SHA256), so a score can only be forged by code that runs
-				// inside this exact iframe session - not by postMessage calls crafted from the parent page's
-				// own devtools console using the secret-less global SDK object.
-				const gameSdkScript = `
-                <script>
-                    (function() {
-                        try {
-                            var DN_SOURCE = "davidnet-game-sdk";
-                            var GAME_ID = "${gameId}";
-                            var pending = {};
-
-                            function uid() {
-                                return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
-                            }
-
-                            function call(type, payload) {
-                                return new Promise(function(resolve, reject) {
-                                    var requestId = uid();
-                                    var timeoutId = setTimeout(function() {
-                                        delete pending[requestId];
-                                        reject(new Error("DavidnetSDK: \\"" + type + "\\" timed out"));
-                                    }, 10000);
-
-                                    pending[requestId] = function(message) {
-                                        clearTimeout(timeoutId);
-                                        if (message.success) {
-                                            resolve(message.data);
-                                        } else {
-                                            reject(new Error(message.error || "DavidnetSDK: unknown error"));
-                                        }
-                                    };
-
-                                    window.parent.postMessage(
-                                        { source: DN_SOURCE, type: type, requestId: requestId, payload: payload },
-                                        "*"
-                                    );
-                                });
-                            }
-
-                            var realtimeListeners = { message: [], presence: [], matched: [], disconnect: [], reconnect: [], error: [] };
-
-                            function subscribe(kind, cb) {
-                                realtimeListeners[kind].push(cb);
-                                return function unsubscribe() {
-                                    var idx = realtimeListeners[kind].indexOf(cb);
-                                    if (idx !== -1) realtimeListeners[kind].splice(idx, 1);
-                                };
-                            }
-
-                            function emit(kind, payload) {
-                                var list = realtimeListeners[kind];
-                                if (!list) return;
-                                list.slice().forEach(function(cb) {
-                                    try { cb(payload); } catch (e) { console.error("DavidnetSDK: realtime listener error", e); }
-                                });
-                            }
-
-                            window.addEventListener("message", function(event) {
-                                var message = event.data;
-                                if (!message || message.source !== DN_SOURCE) return;
-
-                                if (message.type === "event") {
-                                    emit(message.event, message.payload);
-                                    return;
-                                }
-
-                                if (!message.requestId) return;
-                                var handler = pending[message.requestId];
-                                if (!handler) return;
-                                delete pending[message.requestId];
-                                handler(message);
-                            });
-
-                            function hexFromBuffer(buffer) {
-                                var bytes = new Uint8Array(buffer);
-                                var hex = "";
-                                for (var i = 0; i < bytes.length; i++) {
-                                    hex += bytes[i].toString(16).padStart(2, "0");
-                                }
-                                return hex;
-                            }
-
-                            function signMessage(secret, message) {
-                                var enc = new TextEncoder();
-                                return crypto.subtle
-                                    .importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
-                                    .then(function(key) {
-                                        return crypto.subtle.sign("HMAC", key, enc.encode(message));
-                                    })
-                                    .then(hexFromBuffer);
-                            }
-
-                            // Fetched once per page load; the secret never leaves this closure.
-                            var sessionReady = call("startSession", {});
-
-                            window.DavidnetSDK = {
-                                // Submit a score. Server keeps the best score per-player and globally, PER
-                                // CATEGORY - pass { category: "time-attack" } to use a leaderboard other than
-                                // the default one (omit it entirely and you get the one-leaderboard-per-game
-                                // behavior games have always had).
-                                // Resolves: { score, playerHighscore, globalHighscore, isNewPersonalBest, isNewGlobalBest }
-                                applyHighscore: function(score, options) {
-                                    var category = (options && options.category) || "default";
-                                    return sessionReady.then(function(session) {
-                                        var timestamp = Date.now();
-                                        var message = session.sessionId + ":" + GAME_ID + ":" + score + ":" + timestamp;
-                                        return signMessage(session.secret, message).then(function(signature) {
-                                            return call("applyHighscore", {
-                                                score: score,
-                                                category: category,
-                                                sessionId: session.sessionId,
-                                                timestamp: timestamp,
-                                                signature: signature
-                                            });
-                                        });
-                                    });
-                                },
-                                // Pass { category: "time-attack" } to read a non-default leaderboard.
-                                // Resolves: { playerHighscore, globalHighscore, leaderboard: [{ rank, username, displayName, avatarUrl, score }] (top 10) }
-                                getHighscores: function(options) {
-                                    var category = (options && options.category) || "default";
-                                    return call("getHighscores", { category: category });
-                                },
-                                // Persist an arbitrary JSON-serializable save object (max ~1MB). Resolves: { savedAt }
-                                saveJsonBlob: function(data) {
-                                    return sessionReady.then(function(session) {
-                                        var serialized = JSON.stringify(data);
-                                        var timestamp = Date.now();
-                                        var enc = new TextEncoder();
-                                        return crypto.subtle.digest("SHA-256", enc.encode(serialized))
-                                            .then(hexFromBuffer)
-                                            .then(function(dataHash) {
-                                                var message = session.sessionId + ":" + GAME_ID + ":" + dataHash + ":" + timestamp;
-                                                return signMessage(session.secret, message).then(function(signature) {
-                                                    return call("saveJsonBlob", {
-                                                        data: data,
-                                                        sessionId: session.sessionId,
-                                                        timestamp: timestamp,
-                                                        signature: signature
-                                                    });
-                                                });
-                                            });
-                                    });
-                                },
-                                // Resolves: { data, updatedAt } — data is null if nothing was saved yet.
-                                getJsonBlob: function() {
-                                    return call("getJsonBlob", {});
-                                },
-
-                                // Unlock an achievement for the current player. achievement is
-                                // { id, name, description?, icon? } - "id" is a stable string you choose
-                                // (unique within your game, not globally). First unlock wins: if this id was
-                                // already unlocked for this player, the stored name/description/icon don't
-                                // change. Safe to call every time the condition is met.
-                                // Resolves: { isNew, achievement: { id, name, description, icon, unlockedAt } }
-                                unlockAchievement: function(achievement) {
-                                    achievement = achievement || {};
-                                    var id = String(achievement.id || "");
-                                    var name = String(achievement.name || id);
-                                    var description = achievement.description != null ? String(achievement.description) : null;
-                                    var icon = achievement.icon != null ? String(achievement.icon) : null;
-                                    return sessionReady.then(function(session) {
-                                        var serialized = JSON.stringify({ id: id, name: name, description: description, icon: icon });
-                                        var timestamp = Date.now();
-                                        var enc = new TextEncoder();
-                                        return crypto.subtle.digest("SHA-256", enc.encode(serialized))
-                                            .then(hexFromBuffer)
-                                            .then(function(dataHash) {
-                                                var message = session.sessionId + ":" + GAME_ID + ":" + dataHash + ":" + timestamp;
-                                                return signMessage(session.secret, message).then(function(signature) {
-                                                    return call("unlockAchievement", {
-                                                        id: id,
-                                                        name: name,
-                                                        description: description,
-                                                        icon: icon,
-                                                        sessionId: session.sessionId,
-                                                        timestamp: timestamp,
-                                                        signature: signature
-                                                    });
-                                                });
-                                            });
-                                    });
-                                },
-                                // Resolves: { achievements: [{ id, name, description, icon, unlockedAt }] } —
-                                // every achievement this player has unlocked in THIS game.
-                                getAchievements: function() {
-                                    return call("getAchievements", {});
-                                },
-
-                                // Generic real-time extension: rooms (pub/sub channels with presence) plus a
-                                // matchmaking queue. Content-agnostic - the platform never inspects "data", so
-                                // the same primitives work for a 2-player board game, a 50+ player shooter, or
-                                // a one-way live feed (e.g. a price ticker) with no "match" concept at all.
-                                // There is no maximum room size, queue size, or group size.
-                                realtime: {
-                                    // Opens the realtime connection. Called automatically by every other
-                                    // realtime.* method, so you only need this if you want to connect early.
-                                    connect: function() {
-                                        return call("realtimeConnect", {});
-                                    },
-                                    // Joins a named room (created on first join, destroyed when empty). You can
-                                    // join any number of rooms. Resolves: { room, members } - members is the
-                                    // list of everyone already in the room when you joined.
-                                    joinRoom: function(room) {
-                                        return call("realtimeJoinRoom", { room: room });
-                                    },
-                                    // Resolves: { room }
-                                    leaveRoom: function(room) {
-                                        return call("realtimeLeaveRoom", { room: room });
-                                    },
-                                    // Broadcasts arbitrary JSON-serializable data to everyone else currently in
-                                    // the room (pass { echo: true } to also receive your own message back via
-                                    // onMessage). Fire-and-forget - does not wait for delivery.
-                                    send: function(room, data, options) {
-                                        return call("realtimeSend", {
-                                            room: room,
-                                            data: data,
-                                            echo: !!(options && options.echo)
-                                        });
-                                    },
-                                    // Joins a named matchmaking queue. All callers joining the same queue name
-                                    // should agree on the same groupSize. Once "groupSize" callers are waiting,
-                                    // the server pops them off (FIFO) and auto-creates a room for them - listen
-                                    // with onMatched. "metadata" is optional and yours to use (e.g. skill level)
-                                    // for your own custom matching logic built on top of this primitive.
-                                    // Resolves: { queue, position }
-                                    joinQueue: function(queue, groupSize, metadata) {
-                                        return call("realtimeJoinQueue", {
-                                            queue: queue,
-                                            groupSize: groupSize,
-                                            metadata: metadata
-                                        });
-                                    },
-                                    // Resolves: { queue }
-                                    leaveQueue: function(queue) {
-                                        return call("realtimeLeaveQueue", { queue: queue });
-                                    },
-                                    // Fires for every message sent to a room you're in: { room, data, from, ts }.
-                                    // Returns an unsubscribe function.
-                                    onMessage: function(cb) { return subscribe("message", cb); },
-                                    // Fires when someone joins/leaves a room you're in: { room, event, member }.
-                                    onPresence: function(cb) { return subscribe("presence", cb); },
-                                    // Fires when a queue you joined found a full group: { queue, room, members }.
-                                    onMatched: function(cb) { return subscribe("matched", cb); },
-                                    // Fires when the realtime connection drops unexpectedly (auto-reconnect is
-                                    // attempted in the background; your room memberships are silently restored).
-                                    onDisconnect: function(cb) { return subscribe("disconnect", cb); },
-                                    // Fires after a successful auto-reconnect, with the rooms that were rejoined.
-                                    onReconnect: function(cb) { return subscribe("reconnect", cb); },
-                                    // Fires on a server-side error that isn't tied to a specific call, e.g. you
-                                    // got rate-limited or sent to a room you're not in: { code, message }.
-                                    onError: function(cb) { return subscribe("error", cb); }
-                                }
-                            };
-                        } catch(e) {
-                            console.warn("Could not initialize DavidnetSDK", e);
-                        }
-                    })();
-                </script>
-                `;
-
-				// Plaats de scripts direct na de <head> tag of helemaal bovenaan
-				if (htmlContent.toLowerCase().includes("<head>")) {
-					htmlContent = htmlContent.replace(
-						/<head>/i,
-						"<head>\n" + storagePolyfill + gameSdkScript
-					);
-				} else {
-					htmlContent = storagePolyfill + gameSdkScript + htmlContent;
-				}
-
-				// Zet de aangepaste string weer om naar een Buffer voor S3
-				fileData = Buffer.from(htmlContent, "utf-8");
+				fileData = Buffer.from(injectGameSdk(gameId, fileData.toString("utf-8")), "utf-8");
 			} else if (filePath.endsWith(".css")) {
 				contentType = "text/css";
 			} else if (filePath.endsWith(".js")) {
@@ -930,311 +1065,7 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
 				// Inject LocalStorage Polyfill into HTML files
 				if (filePath.endsWith(".html")) {
 					contentType = "text/html";
-
-					let htmlContent = fileData.toString("utf-8");
-
-					// Safe in-memory storage mock that prevents the game from crashing
-					const storagePolyfill = `
-                <script>
-                    (function() {
-                        try {
-                            var memStorage = {};
-                            var mockStorage = {
-                                getItem: function(k) { return memStorage.hasOwnProperty(k) ? memStorage[k] : null; },
-                                setItem: function(k, v) { memStorage[k] = String(v); },
-                                removeItem: function(k) { delete memStorage[k]; },
-                                clear: function() { memStorage = {}; },
-                                key: function(i) { return Object.keys(memStorage)[i] || null; },
-                                get length() { return Object.keys(memStorage).length; }
-                            };
-                            Object.defineProperty(window, 'localStorage', { value: mockStorage, configurable: true, writable: true });
-                            Object.defineProperty(window, 'sessionStorage', { value: mockStorage, configurable: true, writable: true });
-                        } catch(e) {
-                            console.warn("Could not polyfill storage");
-                        }
-                    })();
-                </script>
-                `;
-
-					// SDK bridge: exposes window.DavidnetSDK.{applyHighscore,getHighscores,saveJsonBlob,getJsonBlob}
-					// by round-tripping postMessage calls through the parent player page, which holds the
-					// authenticated session the sandboxed iframe can never access directly.
-					//
-					// Anti-cheat: a per-session secret is fetched once from the server via "startSession" and
-					// kept only in this closure (never attached to window.DavidnetSDK). applyHighscore signs
-					// every submission with it (HMAC-SHA256), so a score can only be forged by code that runs
-					// inside this exact iframe session - not by postMessage calls crafted from the parent page's
-					// own devtools console using the secret-less global SDK object.
-					const gameSdkScript = `
-                <script>
-                    (function() {
-                        try {
-                            var DN_SOURCE = "davidnet-game-sdk";
-                            var GAME_ID = "${gameId}";
-                            var pending = {};
-
-                            function uid() {
-                                return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
-                            }
-
-                            function call(type, payload) {
-                                return new Promise(function(resolve, reject) {
-                                    var requestId = uid();
-                                    var timeoutId = setTimeout(function() {
-                                        delete pending[requestId];
-                                        reject(new Error("DavidnetSDK: \\"" + type + "\\" timed out"));
-                                    }, 10000);
-
-                                    pending[requestId] = function(message) {
-                                        clearTimeout(timeoutId);
-                                        if (message.success) {
-                                            resolve(message.data);
-                                        } else {
-                                            reject(new Error(message.error || "DavidnetSDK: unknown error"));
-                                        }
-                                    };
-
-                                    window.parent.postMessage(
-                                        { source: DN_SOURCE, type: type, requestId: requestId, payload: payload },
-                                        "*"
-                                    );
-                                });
-                            }
-
-                            var realtimeListeners = { message: [], presence: [], matched: [], disconnect: [], reconnect: [], error: [] };
-
-                            function subscribe(kind, cb) {
-                                realtimeListeners[kind].push(cb);
-                                return function unsubscribe() {
-                                    var idx = realtimeListeners[kind].indexOf(cb);
-                                    if (idx !== -1) realtimeListeners[kind].splice(idx, 1);
-                                };
-                            }
-
-                            function emit(kind, payload) {
-                                var list = realtimeListeners[kind];
-                                if (!list) return;
-                                list.slice().forEach(function(cb) {
-                                    try { cb(payload); } catch (e) { console.error("DavidnetSDK: realtime listener error", e); }
-                                });
-                            }
-
-                            window.addEventListener("message", function(event) {
-                                var message = event.data;
-                                if (!message || message.source !== DN_SOURCE) return;
-
-                                if (message.type === "event") {
-                                    emit(message.event, message.payload);
-                                    return;
-                                }
-
-                                if (!message.requestId) return;
-                                var handler = pending[message.requestId];
-                                if (!handler) return;
-                                delete pending[message.requestId];
-                                handler(message);
-                            });
-
-                            function hexFromBuffer(buffer) {
-                                var bytes = new Uint8Array(buffer);
-                                var hex = "";
-                                for (var i = 0; i < bytes.length; i++) {
-                                    hex += bytes[i].toString(16).padStart(2, "0");
-                                }
-                                return hex;
-                            }
-
-                            function signMessage(secret, message) {
-                                var enc = new TextEncoder();
-                                return crypto.subtle
-                                    .importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
-                                    .then(function(key) {
-                                        return crypto.subtle.sign("HMAC", key, enc.encode(message));
-                                    })
-                                    .then(hexFromBuffer);
-                            }
-
-                            // Fetched once per page load; the secret never leaves this closure.
-                            var sessionReady = call("startSession", {});
-
-                            window.DavidnetSDK = {
-                                // Submit a score. Server keeps the best score per-player and globally, PER
-                                // CATEGORY - pass { category: "time-attack" } to use a leaderboard other than
-                                // the default one (omit it entirely and you get the one-leaderboard-per-game
-                                // behavior games have always had).
-                                // Resolves: { score, playerHighscore, globalHighscore, isNewPersonalBest, isNewGlobalBest }
-                                applyHighscore: function(score, options) {
-                                    var category = (options && options.category) || "default";
-                                    return sessionReady.then(function(session) {
-                                        var timestamp = Date.now();
-                                        var message = session.sessionId + ":" + GAME_ID + ":" + score + ":" + timestamp;
-                                        return signMessage(session.secret, message).then(function(signature) {
-                                            return call("applyHighscore", {
-                                                score: score,
-                                                category: category,
-                                                sessionId: session.sessionId,
-                                                timestamp: timestamp,
-                                                signature: signature
-                                            });
-                                        });
-                                    });
-                                },
-                                // Pass { category: "time-attack" } to read a non-default leaderboard.
-                                // Resolves: { playerHighscore, globalHighscore, leaderboard: [{ rank, username, displayName, avatarUrl, score }] (top 10) }
-                                getHighscores: function(options) {
-                                    var category = (options && options.category) || "default";
-                                    return call("getHighscores", { category: category });
-                                },
-                                // Persist an arbitrary JSON-serializable save object (max ~1MB). Resolves: { savedAt }
-                                saveJsonBlob: function(data) {
-                                    return sessionReady.then(function(session) {
-                                        var serialized = JSON.stringify(data);
-                                        var timestamp = Date.now();
-                                        var enc = new TextEncoder();
-                                        return crypto.subtle.digest("SHA-256", enc.encode(serialized))
-                                            .then(hexFromBuffer)
-                                            .then(function(dataHash) {
-                                                var message = session.sessionId + ":" + GAME_ID + ":" + dataHash + ":" + timestamp;
-                                                return signMessage(session.secret, message).then(function(signature) {
-                                                    return call("saveJsonBlob", {
-                                                        data: data,
-                                                        sessionId: session.sessionId,
-                                                        timestamp: timestamp,
-                                                        signature: signature
-                                                    });
-                                                });
-                                            });
-                                    });
-                                },
-                                // Resolves: { data, updatedAt } — data is null if nothing was saved yet.
-                                getJsonBlob: function() {
-                                    return call("getJsonBlob", {});
-                                },
-
-                                // Unlock an achievement for the current player. achievement is
-                                // { id, name, description?, icon? } - "id" is a stable string you choose
-                                // (unique within your game, not globally). First unlock wins: if this id was
-                                // already unlocked for this player, the stored name/description/icon don't
-                                // change. Safe to call every time the condition is met.
-                                // Resolves: { isNew, achievement: { id, name, description, icon, unlockedAt } }
-                                unlockAchievement: function(achievement) {
-                                    achievement = achievement || {};
-                                    var id = String(achievement.id || "");
-                                    var name = String(achievement.name || id);
-                                    var description = achievement.description != null ? String(achievement.description) : null;
-                                    var icon = achievement.icon != null ? String(achievement.icon) : null;
-                                    return sessionReady.then(function(session) {
-                                        var serialized = JSON.stringify({ id: id, name: name, description: description, icon: icon });
-                                        var timestamp = Date.now();
-                                        var enc = new TextEncoder();
-                                        return crypto.subtle.digest("SHA-256", enc.encode(serialized))
-                                            .then(hexFromBuffer)
-                                            .then(function(dataHash) {
-                                                var message = session.sessionId + ":" + GAME_ID + ":" + dataHash + ":" + timestamp;
-                                                return signMessage(session.secret, message).then(function(signature) {
-                                                    return call("unlockAchievement", {
-                                                        id: id,
-                                                        name: name,
-                                                        description: description,
-                                                        icon: icon,
-                                                        sessionId: session.sessionId,
-                                                        timestamp: timestamp,
-                                                        signature: signature
-                                                    });
-                                                });
-                                            });
-                                    });
-                                },
-                                // Resolves: { achievements: [{ id, name, description, icon, unlockedAt }] } —
-                                // every achievement this player has unlocked in THIS game.
-                                getAchievements: function() {
-                                    return call("getAchievements", {});
-                                },
-
-                                // Generic real-time extension: rooms (pub/sub channels with presence) plus a
-                                // matchmaking queue. Content-agnostic - the platform never inspects "data", so
-                                // the same primitives work for a 2-player board game, a 50+ player shooter, or
-                                // a one-way live feed (e.g. a price ticker) with no "match" concept at all.
-                                // There is no maximum room size, queue size, or group size.
-                                realtime: {
-                                    // Opens the realtime connection. Called automatically by every other
-                                    // realtime.* method, so you only need this if you want to connect early.
-                                    connect: function() {
-                                        return call("realtimeConnect", {});
-                                    },
-                                    // Joins a named room (created on first join, destroyed when empty). You can
-                                    // join any number of rooms. Resolves: { room, members } - members is the
-                                    // list of everyone already in the room when you joined.
-                                    joinRoom: function(room) {
-                                        return call("realtimeJoinRoom", { room: room });
-                                    },
-                                    // Resolves: { room }
-                                    leaveRoom: function(room) {
-                                        return call("realtimeLeaveRoom", { room: room });
-                                    },
-                                    // Broadcasts arbitrary JSON-serializable data to everyone else currently in
-                                    // the room (pass { echo: true } to also receive your own message back via
-                                    // onMessage). Fire-and-forget - does not wait for delivery.
-                                    send: function(room, data, options) {
-                                        return call("realtimeSend", {
-                                            room: room,
-                                            data: data,
-                                            echo: !!(options && options.echo)
-                                        });
-                                    },
-                                    // Joins a named matchmaking queue. All callers joining the same queue name
-                                    // should agree on the same groupSize. Once "groupSize" callers are waiting,
-                                    // the server pops them off (FIFO) and auto-creates a room for them - listen
-                                    // with onMatched. "metadata" is optional and yours to use (e.g. skill level)
-                                    // for your own custom matching logic built on top of this primitive.
-                                    // Resolves: { queue, position }
-                                    joinQueue: function(queue, groupSize, metadata) {
-                                        return call("realtimeJoinQueue", {
-                                            queue: queue,
-                                            groupSize: groupSize,
-                                            metadata: metadata
-                                        });
-                                    },
-                                    // Resolves: { queue }
-                                    leaveQueue: function(queue) {
-                                        return call("realtimeLeaveQueue", { queue: queue });
-                                    },
-                                    // Fires for every message sent to a room you're in: { room, data, from, ts }.
-                                    // Returns an unsubscribe function.
-                                    onMessage: function(cb) { return subscribe("message", cb); },
-                                    // Fires when someone joins/leaves a room you're in: { room, event, member }.
-                                    onPresence: function(cb) { return subscribe("presence", cb); },
-                                    // Fires when a queue you joined found a full group: { queue, room, members }.
-                                    onMatched: function(cb) { return subscribe("matched", cb); },
-                                    // Fires when the realtime connection drops unexpectedly (auto-reconnect is
-                                    // attempted in the background; your room memberships are silently restored).
-                                    onDisconnect: function(cb) { return subscribe("disconnect", cb); },
-                                    // Fires after a successful auto-reconnect, with the rooms that were rejoined.
-                                    onReconnect: function(cb) { return subscribe("reconnect", cb); },
-                                    // Fires on a server-side error that isn't tied to a specific call, e.g. you
-                                    // got rate-limited or sent to a room you're not in: { code, message }.
-                                    onError: function(cb) { return subscribe("error", cb); }
-                                }
-                            };
-                        } catch(e) {
-                            console.warn("Could not initialize DavidnetSDK", e);
-                        }
-                    })();
-                </script>
-                `;
-
-					// Plaats de scripts direct na de <head> tag of helemaal bovenaan
-					if (htmlContent.toLowerCase().includes("<head>")) {
-						htmlContent = htmlContent.replace(
-							/<head>/i,
-							"<head>\n" + storagePolyfill + gameSdkScript
-						);
-					} else {
-						htmlContent = storagePolyfill + gameSdkScript + htmlContent;
-					}
-
-					// Zet de aangepaste string weer om naar een Buffer voor S3
-					fileData = Buffer.from(htmlContent, "utf-8");
+					fileData = Buffer.from(injectGameSdk(gameId, fileData.toString("utf-8")), "utf-8");
 				} else if (filePath.endsWith(".css")) {
 					contentType = "text/css";
 				} else if (filePath.endsWith(".js")) {
@@ -1371,6 +1202,8 @@ communityGamesRoute.get("/achievements/mine", requireAuth, async (c) => {
 	const userId = c.get("user").id;
 
 	try {
+		// Only fully completed achievements - a cross-game trophy case shouldn't mix in half-finished
+		// progress bars from games that use progress/target achievements.
 		const achievements = await database
 			.select({
 				gameId: communityGameAchievements.gameId,
@@ -1380,12 +1213,17 @@ communityGamesRoute.get("/achievements/mine", requireAuth, async (c) => {
 				name: communityGameAchievements.name,
 				description: communityGameAchievements.description,
 				icon: communityGameAchievements.icon,
-				unlockedAt: communityGameAchievements.unlockedAt
+				unlockedAt: communityGameAchievements.completedAt
 			})
 			.from(communityGameAchievements)
 			.innerJoin(communityGame, eq(communityGameAchievements.gameId, communityGame.id))
-			.where(eq(communityGameAchievements.userId, userId))
-			.orderBy(desc(communityGameAchievements.unlockedAt));
+			.where(
+				and(
+					eq(communityGameAchievements.userId, userId),
+					isNotNull(communityGameAchievements.completedAt)
+				)
+			)
+			.orderBy(desc(communityGameAchievements.completedAt));
 
 		return c.json({ success: true, code: "SUCCESS", achievements });
 	} catch (error) {
@@ -1467,7 +1305,10 @@ communityGamesRoute.delete("/:id", requireAuth, async (c) => {
 
 		await database.delete(communityGame).where(eq(communityGame.id, gameId));
 
-		void notifyActivity("🗑️ Community game deleted", userId, { "Game ID": gameId, Title: game.title });
+		void notifyActivity("🗑️ Community game deleted", userId, {
+			"Game ID": gameId,
+			Title: game.title
+		});
 
 		return c.json({ success: true, code: "GAME_DELETED" });
 	} catch (error) {
@@ -1564,11 +1405,12 @@ communityGamesRoute.patch("/:id/moderate", requireAuth, async (c) => {
 
 		if (!updatedGame) return c.json({ success: false, code: "NOT_FOUND" }, 404);
 
-		void notifyActivity("🎮 Community game moderated", moderatorId, {
-			"Game ID": updatedGame.id,
-			"Owner ID": updatedGame.userId,
-			Hidden: body.isModerated ? "Yes" : "No"
-		});
+		void notifyActivity(
+			"🎮 Community game moderated",
+			moderatorId,
+			{ "Game ID": updatedGame.id, Hidden: body.isModerated ? "Yes" : "No" },
+			updatedGame.userId
+		);
 
 		return c.json({ success: true, code: "GAME_MODERATED", game: updatedGame });
 	} catch (error) {
@@ -1919,6 +1761,11 @@ communityGamesRoute.post("/:id/save", requireAuth, async (c) => {
 		return c.json({ success: false, code: "MISSING_DATA" }, 400);
 	}
 
+	const slot = sanitizeSlot(body.slot);
+	if (slot === null) {
+		return c.json({ success: false, code: "INVALID_SLOT" }, 400);
+	}
+
 	const serialized = JSON.stringify(body.data);
 	if (serialized.length > MAX_SAVE_JSON_LENGTH) {
 		return c.json({ success: false, code: "SAVE_TOO_LARGE" }, 413);
@@ -1964,13 +1811,13 @@ communityGamesRoute.post("/:id/save", requireAuth, async (c) => {
 		const now = new Date();
 		await database
 			.insert(communityGameSaves)
-			.values({ gameId, userId: user.id, data: body.data, updatedAt: now })
+			.values({ gameId, userId: user.id, slot, data: body.data, updatedAt: now })
 			.onConflictDoUpdate({
-				target: [communityGameSaves.gameId, communityGameSaves.userId],
+				target: [communityGameSaves.gameId, communityGameSaves.userId, communityGameSaves.slot],
 				set: { data: body.data, updatedAt: now }
 			});
 
-		return c.json({ success: true, code: "SUCCESS", savedAt: now });
+		return c.json({ success: true, code: "SUCCESS", slot, savedAt: now });
 	} catch (error) {
 		console.error("Failed to save json blob:", error);
 		return c.json({ success: false, code: "SAVE_FAILED" }, 500);
@@ -1985,17 +1832,28 @@ communityGamesRoute.get("/:id/save", requireAuth, async (c) => {
 	}
 
 	const gameId = c.req.param("id");
+	const slot = sanitizeSlot(c.req.query("slot"));
+	if (slot === null) {
+		return c.json({ success: false, code: "INVALID_SLOT" }, 400);
+	}
 
 	try {
 		const [save] = await database
 			.select({ data: communityGameSaves.data, updatedAt: communityGameSaves.updatedAt })
 			.from(communityGameSaves)
-			.where(and(eq(communityGameSaves.gameId, gameId), eq(communityGameSaves.userId, user.id)))
+			.where(
+				and(
+					eq(communityGameSaves.gameId, gameId),
+					eq(communityGameSaves.userId, user.id),
+					eq(communityGameSaves.slot, slot)
+				)
+			)
 			.limit(1);
 
 		return c.json({
 			success: true,
 			code: "SUCCESS",
+			slot,
 			data: save?.data ?? null,
 			updatedAt: save?.updatedAt ?? null
 		});
@@ -2006,6 +1864,8 @@ communityGamesRoute.get("/:id/save", requireAuth, async (c) => {
 });
 
 // --- 13. WIPE OWN SAVE ---
+// Wipes ALL save slots for this player/game in one go - a game with multiple slots doesn't get
+// multiple "wipe" buttons, this is a full reset.
 communityGamesRoute.delete("/:id/save", requireAuth, async (c) => {
 	const user = c.get("user");
 	const gameId = c.req.param("id");
@@ -2062,6 +1922,28 @@ communityGamesRoute.post("/:id/achievement", requireAuth, async (c) => {
 		return c.json({ success: false, code: "INVALID_ACHIEVEMENT_ICON" }, 400);
 	}
 
+	// Progress/target: omitting both means a classic instant-unlock achievement. They only make
+	// sense together, so passing just one of them is rejected.
+	const hasProgressInput = body.progress !== undefined && body.progress !== null;
+	const hasTargetInput = body.target !== undefined && body.target !== null;
+	if (hasProgressInput !== hasTargetInput) {
+		return c.json({ success: false, code: "INVALID_ACHIEVEMENT_PROGRESS" }, 400);
+	}
+
+	let progress: number | null = null;
+	let target: number | null = null;
+	if (hasProgressInput && hasTargetInput) {
+		target = Number(body.target);
+		progress = Number(body.progress);
+		if (!Number.isInteger(target) || target < 1 || target > MAX_ACHIEVEMENT_PROGRESS_VALUE) {
+			return c.json({ success: false, code: "INVALID_ACHIEVEMENT_TARGET" }, 400);
+		}
+		if (!Number.isInteger(progress) || progress < 0) {
+			return c.json({ success: false, code: "INVALID_ACHIEVEMENT_PROGRESS" }, 400);
+		}
+		progress = Math.min(progress, target);
+	}
+
 	const sessionId = body.sessionId;
 	const timestamp = Number(body.timestamp);
 	const signature = body.signature;
@@ -2076,7 +1958,7 @@ communityGamesRoute.post("/:id/achievement", requireAuth, async (c) => {
 
 	// Sign over the same shape the injected SDK script hashed client-side.
 	const payloadHash = createHash("sha256")
-		.update(JSON.stringify({ id: achievementId, name, description, icon }))
+		.update(JSON.stringify({ id: achievementId, name, description, icon, progress, target }))
 		.digest("hex");
 
 	const sessionCheck = await verifyGameSession({
@@ -2101,10 +1983,27 @@ communityGamesRoute.post("/:id/achievement", requireAuth, async (c) => {
 
 		if (!game) return c.json({ success: false, code: "GAME_NOT_FOUND" }, 404);
 
-		// First unlock wins - a repeat unlock is a no-op that just confirms the player already has it.
+		const now = new Date();
+		// A classic achievement (no target) completes the instant it's created; a progress
+		// achievement only completes once progress has already reached target on this very call.
+		const completesOnInsert = target === null || (progress !== null && progress >= target);
+
+		// First call wins the metadata (name/description/icon) and creates the row - a repeat call
+		// either advances progress (if still in progress) or is a cheap no-op (if already completed).
 		const inserted = await database
 			.insert(communityGameAchievements)
-			.values({ gameId, userId: user.id, achievementId, name, description, icon })
+			.values({
+				gameId,
+				userId: user.id,
+				achievementId,
+				name,
+				description,
+				icon,
+				progress,
+				target,
+				unlockedAt: now,
+				completedAt: completesOnInsert ? now : null
+			})
 			.onConflictDoNothing({
 				target: [
 					communityGameAchievements.gameId,
@@ -2114,13 +2013,33 @@ communityGamesRoute.post("/:id/achievement", requireAuth, async (c) => {
 			})
 			.returning();
 
-		const isNew = inserted.length > 0;
+		let achievement = inserted[0];
+		let isNew = Boolean(achievement) && completesOnInsert;
 
-		const [achievement] = isNew
-			? inserted
-			: await database
-					.select()
-					.from(communityGameAchievements)
+		if (!achievement) {
+			const [existing] = await database
+				.select()
+				.from(communityGameAchievements)
+				.where(
+					and(
+						eq(communityGameAchievements.gameId, gameId),
+						eq(communityGameAchievements.userId, user.id),
+						eq(communityGameAchievements.achievementId, achievementId)
+					)
+				)
+				.limit(1);
+
+			achievement = existing;
+
+			// Once completed, an achievement is immutable - this mirrors the "first unlock wins"
+			// guarantee a classic achievement already had. Only advance progress while still open.
+			if (achievement && !achievement.completedAt && progress !== null && target !== null) {
+				const newProgress = Math.max(achievement.progress ?? 0, progress);
+				const completing = newProgress >= target;
+
+				const [updated] = await database
+					.update(communityGameAchievements)
+					.set({ progress: newProgress, target, completedAt: completing ? now : null })
 					.where(
 						and(
 							eq(communityGameAchievements.gameId, gameId),
@@ -2128,7 +2047,12 @@ communityGamesRoute.post("/:id/achievement", requireAuth, async (c) => {
 							eq(communityGameAchievements.achievementId, achievementId)
 						)
 					)
-					.limit(1);
+					.returning();
+
+				achievement = updated;
+				isNew = completing;
+			}
+		}
 
 		return c.json({
 			success: true,
@@ -2139,7 +2063,9 @@ communityGamesRoute.post("/:id/achievement", requireAuth, async (c) => {
 				name: achievement.name,
 				description: achievement.description,
 				icon: achievement.icon,
-				unlockedAt: achievement.unlockedAt
+				progress: achievement.progress,
+				target: achievement.target,
+				unlockedAt: achievement.completedAt
 			}
 		});
 	} catch (error) {
@@ -2158,13 +2084,18 @@ communityGamesRoute.get("/:id/achievements", requireAuth, async (c) => {
 	const gameId = c.req.param("id");
 
 	try {
+		// Includes in-progress (not yet completed) achievements too, so a game can rebuild a
+		// progress bar on load - "unlockedAt" is null for those. unlockedAt here is completedAt,
+		// not the row's creation time (see the schema comment on completedAt).
 		const rows = await database
 			.select({
 				id: communityGameAchievements.achievementId,
 				name: communityGameAchievements.name,
 				description: communityGameAchievements.description,
 				icon: communityGameAchievements.icon,
-				unlockedAt: communityGameAchievements.unlockedAt
+				progress: communityGameAchievements.progress,
+				target: communityGameAchievements.target,
+				unlockedAt: communityGameAchievements.completedAt
 			})
 			.from(communityGameAchievements)
 			.where(
@@ -2175,10 +2106,262 @@ communityGamesRoute.get("/:id/achievements", requireAuth, async (c) => {
 			)
 			.orderBy(desc(communityGameAchievements.unlockedAt));
 
-		return c.json({ success: true, code: "SUCCESS", achievements: rows });
+		if (rows.length === 0) {
+			return c.json({ success: true, code: "SUCCESS", achievements: [] });
+		}
+
+		// Rarity: the share of players (0-100) who have fully unlocked each achievement id, out of
+		// everyone who has ever started a play session for this game - a reasonable proxy for
+		// "played", and already tracked for anti-cheat sessions.
+		const achievementIds = Array.from(new Set(rows.map((row) => row.id)));
+
+		const [totalPlayersRow] = await database
+			.select({ totalPlayers: sql<number>`count(distinct ${communityGameSessions.userId})::int` })
+			.from(communityGameSessions)
+			.where(eq(communityGameSessions.gameId, gameId));
+		const totalPlayers = totalPlayersRow?.totalPlayers ?? 0;
+
+		const unlockCounts = await database
+			.select({
+				achievementId: communityGameAchievements.achievementId,
+				unlockers: sql<number>`count(distinct ${communityGameAchievements.userId})::int`
+			})
+			.from(communityGameAchievements)
+			.where(
+				and(
+					eq(communityGameAchievements.gameId, gameId),
+					inArray(communityGameAchievements.achievementId, achievementIds),
+					isNotNull(communityGameAchievements.completedAt)
+				)
+			)
+			.groupBy(communityGameAchievements.achievementId);
+		const unlockersById = new Map(unlockCounts.map((row) => [row.achievementId, row.unlockers]));
+
+		const achievements = rows.map((row) => ({
+			...row,
+			unlockedPercentage:
+				totalPlayers > 0
+					? Math.min(100, Math.round(((unlockersById.get(row.id) ?? 0) / totalPlayers) * 100))
+					: 0
+		}));
+
+		return c.json({ success: true, code: "SUCCESS", achievements });
 	} catch (error) {
 		console.error("Failed to fetch achievements:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 13D. UGC: PUBLISH (OR UPDATE) A LEVEL ---
+// Publishes a new level, or - if "id" names a level this caller already owns - overwrites it in
+// place. "data" is an opaque JSON blob; the platform never looks inside it.
+communityGamesRoute.post("/:id/levels", requireAuth, async (c) => {
+	const user = c.get("user");
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+	let body;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ success: false, code: "INVALID_JSON" }, 400);
+	}
+
+	const title = typeof body.title === "string" ? body.title.trim() : "";
+	if (title.length === 0 || title.length > MAX_LEVEL_TITLE_LENGTH) {
+		return c.json({ success: false, code: "INVALID_LEVEL_TITLE" }, 400);
+	}
+
+	if (body.data === undefined) {
+		return c.json({ success: false, code: "MISSING_DATA" }, 400);
+	}
+
+	const serialized = JSON.stringify(body.data);
+	if (serialized.length > MAX_LEVEL_JSON_LENGTH) {
+		return c.json({ success: false, code: "LEVEL_TOO_LARGE" }, 413);
+	}
+
+	const existingId = typeof body.id === "string" && body.id ? body.id : null;
+
+	try {
+		const [game] = await database
+			.select({ id: communityGame.id })
+			.from(communityGame)
+			.where(eq(communityGame.id, gameId))
+			.limit(1);
+
+		if (!game) return c.json({ success: false, code: "GAME_NOT_FOUND" }, 404);
+
+		if (existingId) {
+			const [existing] = await database
+				.select({ userId: communityGameLevels.userId })
+				.from(communityGameLevels)
+				.where(and(eq(communityGameLevels.id, existingId), eq(communityGameLevels.gameId, gameId)))
+				.limit(1);
+
+			if (!existing) return c.json({ success: false, code: "LEVEL_NOT_FOUND" }, 404);
+			if (existing.userId !== user.id) {
+				return c.json({ success: false, code: "FORBIDDEN" }, 403);
+			}
+
+			const now = new Date();
+			await database
+				.update(communityGameLevels)
+				.set({ title, data: body.data, updatedAt: now })
+				.where(eq(communityGameLevels.id, existingId));
+
+			return c.json({
+				success: true,
+				code: "SUCCESS",
+				level: { id: existingId, title, updatedAt: now }
+			});
+		}
+
+		const [{ count }] = await database
+			.select({ count: sql<number>`count(*)::int` })
+			.from(communityGameLevels)
+			.where(and(eq(communityGameLevels.gameId, gameId), eq(communityGameLevels.userId, user.id)));
+
+		if (count >= MAX_LEVELS_PER_USER_PER_GAME) {
+			return c.json({ success: false, code: "TOO_MANY_LEVELS" }, 400);
+		}
+
+		const [level] = await database
+			.insert(communityGameLevels)
+			.values({ gameId, userId: user.id, title, data: body.data })
+			.returning();
+
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			level: {
+				id: level.id,
+				title: level.title,
+				createdAt: level.createdAt,
+				updatedAt: level.updatedAt
+			}
+		});
+	} catch (error) {
+		console.error("Failed to publish level:", error);
+		return c.json({ success: false, code: "PUBLISH_FAILED" }, 500);
+	}
+});
+
+// --- 13E. UGC: LIST PUBLISHED LEVELS ---
+communityGamesRoute.get("/:id/levels", requireAuth, async (c) => {
+	const user = c.get("user");
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+	const mine = c.req.query("mine") === "true";
+
+	const limitRaw = Number(c.req.query("limit"));
+	const limit = Number.isInteger(limitRaw)
+		? Math.min(Math.max(limitRaw, 1), LEVELS_PAGE_SIZE_MAX)
+		: LEVELS_PAGE_SIZE_DEFAULT;
+
+	const offsetRaw = Number(c.req.query("offset"));
+	const offset = Number.isInteger(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0;
+
+	try {
+		const conditions = mine
+			? and(eq(communityGameLevels.gameId, gameId), eq(communityGameLevels.userId, user.id))
+			: eq(communityGameLevels.gameId, gameId);
+
+		// Fetch one extra row to know whether there's another page, without a separate count query.
+		const rows = await database
+			.select({
+				id: communityGameLevels.id,
+				title: communityGameLevels.title,
+				creator: users.username,
+				creatorDisplayName: users.displayName,
+				createdAt: communityGameLevels.createdAt,
+				updatedAt: communityGameLevels.updatedAt
+			})
+			.from(communityGameLevels)
+			.innerJoin(users, eq(communityGameLevels.userId, users.userId))
+			.where(conditions)
+			.orderBy(desc(communityGameLevels.createdAt))
+			.limit(limit + 1)
+			.offset(offset);
+
+		const hasMore = rows.length > limit;
+
+		return c.json({ success: true, code: "SUCCESS", levels: rows.slice(0, limit), hasMore });
+	} catch (error) {
+		console.error("Failed to list levels:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 13F. UGC: GET ONE LEVEL (including its data) ---
+communityGamesRoute.get("/:id/levels/:levelId", requireAuth, async (c) => {
+	const user = c.get("user");
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+	const levelId = c.req.param("levelId");
+
+	try {
+		const [level] = await database
+			.select({
+				id: communityGameLevels.id,
+				title: communityGameLevels.title,
+				data: communityGameLevels.data,
+				creator: users.username,
+				creatorDisplayName: users.displayName,
+				createdAt: communityGameLevels.createdAt,
+				updatedAt: communityGameLevels.updatedAt
+			})
+			.from(communityGameLevels)
+			.innerJoin(users, eq(communityGameLevels.userId, users.userId))
+			.where(and(eq(communityGameLevels.id, levelId), eq(communityGameLevels.gameId, gameId)))
+			.limit(1);
+
+		if (!level) return c.json({ success: false, code: "LEVEL_NOT_FOUND" }, 404);
+
+		return c.json({ success: true, code: "SUCCESS", level });
+	} catch (error) {
+		console.error("Failed to fetch level:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 13G. UGC: DELETE A LEVEL (author, or the game's creator/mods) ---
+communityGamesRoute.delete("/:id/levels/:levelId", requireAuth, async (c) => {
+	const user = c.get("user");
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+	const levelId = c.req.param("levelId");
+
+	try {
+		const [level] = await database
+			.select({ userId: communityGameLevels.userId })
+			.from(communityGameLevels)
+			.where(and(eq(communityGameLevels.id, levelId), eq(communityGameLevels.gameId, gameId)))
+			.limit(1);
+
+		if (!level) return c.json({ success: false, code: "LEVEL_NOT_FOUND" }, 404);
+
+		if (level.userId !== user.id && !(await canManageGame(gameId, user.id))) {
+			return c.json({ success: false, code: "FORBIDDEN" }, 403);
+		}
+
+		await database.delete(communityGameLevels).where(eq(communityGameLevels.id, levelId));
+
+		return c.json({ success: true, code: "SUCCESS", id: levelId });
+	} catch (error) {
+		console.error("Failed to delete level:", error);
+		return c.json({ success: false, code: "DELETE_FAILED" }, 500);
 	}
 });
 
@@ -2205,6 +2388,8 @@ communityGamesRoute.get("/:id/manage/players", requireAuth, async (c) => {
 			.from(communityGameHighscores)
 			.where(eq(communityGameHighscores.gameId, gameId));
 
+		// Scoped to the default slot only - the moderation panel is a single-value viewer, same as
+		// before named save slots existed. A game's other slots aren't exposed here.
 		const saves = await database
 			.select({
 				userId: communityGameSaves.userId,
@@ -2212,7 +2397,9 @@ communityGamesRoute.get("/:id/manage/players", requireAuth, async (c) => {
 				updatedAt: communityGameSaves.updatedAt
 			})
 			.from(communityGameSaves)
-			.where(eq(communityGameSaves.gameId, gameId));
+			.where(
+				and(eq(communityGameSaves.gameId, gameId), eq(communityGameSaves.slot, DEFAULT_SAVE_SLOT))
+			);
 
 		const userIds = Array.from(
 			new Set([...highscores.map((h) => h.userId), ...saves.map((s) => s.userId)])
@@ -2299,20 +2486,31 @@ communityGamesRoute.patch("/:id/manage/saves/:userId", requireAuth, async (c) =>
 	}
 
 	try {
+		// Scoped to the default slot only - see the matching note on GET /manage/players.
 		const [previous] = await database
 			.select({ data: communityGameSaves.data })
 			.from(communityGameSaves)
 			.where(
-				and(eq(communityGameSaves.gameId, gameId), eq(communityGameSaves.userId, targetUserId))
+				and(
+					eq(communityGameSaves.gameId, gameId),
+					eq(communityGameSaves.userId, targetUserId),
+					eq(communityGameSaves.slot, DEFAULT_SAVE_SLOT)
+				)
 			)
 			.limit(1);
 
 		const now = new Date();
 		await database
 			.insert(communityGameSaves)
-			.values({ gameId, userId: targetUserId, data: body.data, updatedAt: now })
+			.values({
+				gameId,
+				userId: targetUserId,
+				slot: DEFAULT_SAVE_SLOT,
+				data: body.data,
+				updatedAt: now
+			})
 			.onConflictDoUpdate({
-				target: [communityGameSaves.gameId, communityGameSaves.userId],
+				target: [communityGameSaves.gameId, communityGameSaves.userId, communityGameSaves.slot],
 				set: { data: body.data, updatedAt: now }
 			});
 
@@ -2342,18 +2540,27 @@ communityGamesRoute.delete("/:id/manage/saves/:userId", requireAuth, async (c) =
 	}
 
 	try {
+		// Scoped to the default slot only - see the matching note on GET /manage/players.
 		const [previous] = await database
 			.select({ data: communityGameSaves.data })
 			.from(communityGameSaves)
 			.where(
-				and(eq(communityGameSaves.gameId, gameId), eq(communityGameSaves.userId, targetUserId))
+				and(
+					eq(communityGameSaves.gameId, gameId),
+					eq(communityGameSaves.userId, targetUserId),
+					eq(communityGameSaves.slot, DEFAULT_SAVE_SLOT)
+				)
 			)
 			.limit(1);
 
 		await database
 			.delete(communityGameSaves)
 			.where(
-				and(eq(communityGameSaves.gameId, gameId), eq(communityGameSaves.userId, targetUserId))
+				and(
+					eq(communityGameSaves.gameId, gameId),
+					eq(communityGameSaves.userId, targetUserId),
+					eq(communityGameSaves.slot, DEFAULT_SAVE_SLOT)
+				)
 			);
 
 		await logGameAudit({

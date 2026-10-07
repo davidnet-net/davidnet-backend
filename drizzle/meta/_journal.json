@@ -288,6 +288,13 @@
       "when": 1791309492423,
       "tag": "0040_redundant_mantis",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1791375246888,
+      "tag": "0041_many_demogoblin",
+      "breakpoints": true
     }
   ]
 }

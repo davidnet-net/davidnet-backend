@@ -17,6 +17,10 @@ export const communityGameAuditActionEnum = authSchema.enum("community_game_audi
 // before multi-leaderboard support existed working unchanged (single leaderboard per game).
 export const DEFAULT_LEADERBOARD_CATEGORY = "default";
 
+// Slot used for a save submission that doesn't specify one - keeps every game uploaded before
+// named save slots existed working unchanged (single save per player per game).
+export const DEFAULT_SAVE_SLOT = "default";
+
 // --- TABLES ---
 export const communityGame = authSchema.table("community_games", {
 	id: uuid("id")
@@ -86,7 +90,11 @@ export const communityGameHighscores = authSchema.table(
 	(table) => [primaryKey({ columns: [table.gameId, table.userId, table.category] })]
 );
 
-// Arbitrary JSON save-data blob per player per community game.
+// Arbitrary JSON save-data blob per player per community game, scoped to a "slot" so a game can
+// keep more than one save per player (e.g. multiple save files, or a separate hardcore-mode save).
+// Games that never pass a slot (every game uploaded before this existed, and any new game that
+// doesn't bother) land in the implicit DEFAULT_SAVE_SLOT row, which behaves exactly like the old
+// single-save-per-player model.
 export const communityGameSaves = authSchema.table(
 	"community_game_saves",
 	{
@@ -96,16 +104,23 @@ export const communityGameSaves = authSchema.table(
 		userId: uuid("user_id")
 			.notNull()
 			.references(() => users.userId, { onDelete: "cascade" }),
+		slot: text("slot").default(DEFAULT_SAVE_SLOT).notNull(),
 		data: jsonb("data").notNull(),
 		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
 	},
-	(table) => [primaryKey({ columns: [table.gameId, table.userId] })]
+	(table) => [primaryKey({ columns: [table.gameId, table.userId, table.slot] })]
 );
 
-// An achievement a player has unlocked in a community game. Games define their own achievements
-// ad hoc (just pick an id) - there is no upfront catalog, the same way games pick highscore
-// categories ad hoc. First unlock wins: name/description/icon are whatever the game passed the
-// first time that (gameId, userId, achievementId) triple was unlocked.
+// An achievement a player has unlocked (or made progress on) in a community game. Games define
+// their own achievements ad hoc (just pick an id) - there is no upfront catalog, the same way
+// games pick highscore categories ad hoc. First unlock wins: name/description/icon are whatever
+// the game passed the first time that (gameId, userId, achievementId) triple was touched.
+//
+// progress/target are both null for a classic instant-unlock achievement (unlockedAt is set the
+// moment the row is created). When a game passes progress+target, the row can exist BEFORE it's
+// earned - progress/target track a progress bar, and completedAt (aliased as "unlockedAt" in the
+// API) stays null until progress reaches target, at which point it's set once and never changes
+// again (same "first completion wins" immutability as a classic achievement).
 export const communityGameAchievements = authSchema.table(
 	"community_game_achievements",
 	{
@@ -121,10 +136,39 @@ export const communityGameAchievements = authSchema.table(
 		description: text("description"),
 		// Short emoji or icon name the game chose to represent this achievement.
 		icon: text("icon"),
-		unlockedAt: timestamp("unlocked_at", { withTimezone: true }).defaultNow().notNull()
+		// Current/target progress for a progress-bar achievement; both null for a classic
+		// instant-unlock achievement.
+		progress: integer("progress"),
+		target: integer("target"),
+		// When this row was first created (first unlock, or first progress update).
+		unlockedAt: timestamp("unlocked_at", { withTimezone: true }).defaultNow().notNull(),
+		// When the achievement actually completed (target reached, or immediately for a classic
+		// achievement). Null while a progress achievement is still in progress.
+		completedAt: timestamp("completed_at", { withTimezone: true })
 	},
 	(table) => [primaryKey({ columns: [table.gameId, table.userId, table.achievementId] })]
 );
+
+// A player-published level/map for a community game (generic UGC level-upload system). "data" is
+// an opaque JSON blob - the platform never looks inside it, so the same table works for any
+// level/map/track format a game defines. Published levels are public: any player of the game can
+// list and fetch them (same trust model as the rest of the sandboxed game - the game decides what
+// to publish and how to interpret what it downloads).
+export const communityGameLevels = authSchema.table("community_game_levels", {
+	id: uuid("id")
+		.primaryKey()
+		.default(sql`uuidv7()`),
+	gameId: uuid("game_id")
+		.notNull()
+		.references(() => communityGame.id, { onDelete: "cascade" }),
+	userId: uuid("user_id")
+		.notNull()
+		.references(() => users.userId, { onDelete: "cascade" }),
+	title: text("title").notNull(),
+	data: jsonb("data").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+});
 
 // Per-session anti-cheat secret for a community game play session. Issued once when the game's
 // iframe loads; kept only in that iframe's JS closure (never exposed on window.DavidnetSDK). Score
@@ -180,6 +224,9 @@ export type NewCommunityGameSave = InferInsertModel<typeof communityGameSaves>;
 
 export type CommunityGameAchievement = InferSelectModel<typeof communityGameAchievements>;
 export type NewCommunityGameAchievement = InferInsertModel<typeof communityGameAchievements>;
+
+export type CommunityGameLevel = InferSelectModel<typeof communityGameLevels>;
+export type NewCommunityGameLevel = InferInsertModel<typeof communityGameLevels>;
 
 export type CommunityGameAuditLog = InferSelectModel<typeof communityGameAuditLog>;
 export type NewCommunityGameAuditLog = InferInsertModel<typeof communityGameAuditLog>;

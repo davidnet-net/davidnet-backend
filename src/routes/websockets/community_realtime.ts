@@ -48,12 +48,16 @@ const GLOBAL_STATE_KEY = "__community_realtime_state__";
 if (!(globalThis as any)[GLOBAL_STATE_KEY]) {
 	(globalThis as any)[GLOBAL_STATE_KEY] = {
 		roomMembers: new Map<string, Map<string, Set<RealtimeClient>>>(),
+		// Per-room key/value store for realtime.setState - the latest value per key, handed out as a
+		// snapshot to anyone who joins the room. Cleared whenever the room itself is (room empties).
+		roomState: new Map<string, Map<string, Map<string, unknown>>>(),
 		queues: new Map<string, Map<string, QueueEntry[]>>(),
 		allClients: new Set<RealtimeClient>()
 	};
 }
 const state = (globalThis as any)[GLOBAL_STATE_KEY];
 const roomMembers: Map<string, Map<string, Set<RealtimeClient>>> = state.roomMembers;
+const roomState: Map<string, Map<string, Map<string, unknown>>> = state.roomState;
 const queues: Map<string, Map<string, QueueEntry[]>> = state.queues;
 const allClients: Set<RealtimeClient> = state.allClients;
 
@@ -102,12 +106,13 @@ if ((globalThis as any)[GLOBAL_INTERVAL_KEY]) {
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const RATE_LIMIT_WINDOW_MS = 1000;
 const RATE_LIMIT_MAX_MESSAGES = 200;
+// Per-room cap on distinct setState keys - not a gameplay limit, just a backstop against a room
+// accumulating unbounded memory from a buggy or malicious game (e.g. a unique key per tick).
+const MAX_STATE_KEYS_PER_ROOM = 500;
 
 function isRateLimited(client: RealtimeClient): boolean {
 	const now = Date.now();
-	client.messageTimestamps = client.messageTimestamps.filter(
-		(t) => now - t < RATE_LIMIT_WINDOW_MS
-	);
+	client.messageTimestamps = client.messageTimestamps.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
 	if (client.messageTimestamps.length >= RATE_LIMIT_MAX_MESSAGES) return true;
 	client.messageTimestamps.push(now);
 	return false;
@@ -165,8 +170,28 @@ function removeRoomIfEmpty(gameId: string, room: string) {
 	const gameRooms = roomMembers.get(gameId);
 	if (!gameRooms) return;
 	const members = gameRooms.get(room);
-	if (members && members.size === 0) gameRooms.delete(room);
+	if (members && members.size === 0) {
+		gameRooms.delete(room);
+		// The state channel is scoped to the room's lifetime, same as presence - a fresh room starts
+		// with a clean slate, it doesn't resurrect whatever the last occupants left behind.
+		roomState.get(gameId)?.delete(room);
+		if (roomState.get(gameId)?.size === 0) roomState.delete(gameId);
+	}
 	if (gameRooms.size === 0) roomMembers.delete(gameId);
+}
+
+function getOrCreateRoomState(gameId: string, room: string): Map<string, unknown> {
+	let gameRoomState = roomState.get(gameId);
+	if (!gameRoomState) {
+		gameRoomState = new Map();
+		roomState.set(gameId, gameRoomState);
+	}
+	let keys = gameRoomState.get(room);
+	if (!keys) {
+		keys = new Map();
+		gameRoomState.set(room, keys);
+	}
+	return keys;
 }
 
 function sendTo(client: RealtimeClient, frame: unknown) {
@@ -187,6 +212,16 @@ function broadcastToRoomMembers(
 	for (const member of members) {
 		if (member === exclude) continue;
 		if (member.ws && member.ws.readyState === 1) member.ws.send(msgStr);
+	}
+}
+
+// Lobby-wide: every client currently connected to this game's realtime namespace, independent of
+// room membership - used for realtime.announce.
+function broadcastToGameClients(gameId: string, frame: unknown, exclude?: RealtimeClient) {
+	const msgStr = JSON.stringify(frame);
+	for (const client of allClients) {
+		if (client.gameId !== gameId || client === exclude) continue;
+		if (client.ws && client.ws.readyState === 1) client.ws.send(msgStr);
 	}
 }
 
@@ -265,7 +300,9 @@ communityRealtimeWs.get(
 		await next();
 	},
 	upgradeWebSocket((c) => {
-		const gameId = c.req.param("gameId");
+		// Always present: this callback only runs after the preceding middleware matched the same
+		// "/:gameId/realtime" route and validated the game exists.
+		const gameId = c.req.param("gameId")!;
 		const member = c.get("member");
 
 		const client: RealtimeClient = {
@@ -339,10 +376,18 @@ communityRealtimeWs.get(
 
 						const members = getOrCreateRoom(gameId, room);
 						const snapshot = Array.from(members).map((m) => m.member);
+						const stateSnapshot = Object.fromEntries(getOrCreateRoomState(gameId, room));
 						members.add(client);
 						client.rooms.add(room);
 
-						sendTo(client, { type: "ack", reqId, ok: true, room, members: snapshot });
+						sendTo(client, {
+							type: "ack",
+							reqId,
+							ok: true,
+							room,
+							members: snapshot,
+							state: stateSnapshot
+						});
 						broadcastToRoomMembers(
 							gameId,
 							room,
@@ -356,6 +401,75 @@ communityRealtimeWs.get(
 						const room = typeof data.room === "string" ? data.room : "";
 						leaveRoom(client, room);
 						sendTo(client, { type: "ack", reqId, ok: true, room });
+						return;
+					}
+
+					case "roomInfo": {
+						const room = typeof data.room === "string" ? data.room.slice(0, 200) : "";
+						if (!room) {
+							sendTo(client, { type: "ack", reqId, ok: false, code: "INVALID_ROOM" });
+							return;
+						}
+
+						// Deliberately does NOT join the room or create it - just a read-only peek, same
+						// info a joiner would see in their own join ack's "members" field.
+						const members = roomMembers.get(gameId)?.get(room);
+						const snapshot = members ? Array.from(members).map((m) => m.member) : [];
+
+						sendTo(client, {
+							type: "ack",
+							reqId,
+							ok: true,
+							room,
+							memberCount: snapshot.length,
+							members: snapshot
+						});
+						return;
+					}
+
+					case "setState": {
+						const room = typeof data.room === "string" ? data.room : "";
+						if (!room || !client.rooms.has(room)) {
+							sendTo(client, {
+								type: "error",
+								code: "NOT_IN_ROOM",
+								message: `Not joined to room "${room}"`
+							});
+							return;
+						}
+
+						const key = typeof data.key === "string" ? data.key.slice(0, 200) : "";
+						if (!key) {
+							sendTo(client, { type: "ack", reqId, ok: false, code: "INVALID_KEY" });
+							return;
+						}
+
+						const keys = getOrCreateRoomState(gameId, room);
+						if (!keys.has(key) && keys.size >= MAX_STATE_KEYS_PER_ROOM) {
+							sendTo(client, { type: "ack", reqId, ok: false, code: "STATE_LIMIT_REACHED" });
+							return;
+						}
+
+						keys.set(key, data.value);
+						sendTo(client, { type: "ack", reqId, ok: true, room, key });
+						broadcastToRoomMembers(
+							gameId,
+							room,
+							{ type: "state", room, key, value: data.value, from: client.member },
+							client
+						);
+						return;
+					}
+
+					case "announce": {
+						const frame = {
+							type: "announcement",
+							data: data.data,
+							from: client.member,
+							ts: Date.now()
+						};
+						broadcastToGameClients(gameId, frame, data.echo ? undefined : client);
+						sendTo(client, { type: "ack", reqId, ok: true });
 						return;
 					}
 
@@ -436,6 +550,25 @@ communityRealtimeWs.get(
 							if (idx !== -1) entries.splice(idx, 1);
 						}
 						sendTo(client, { type: "ack", reqId, ok: true, queue: queueName });
+						return;
+					}
+
+					case "queueInfo": {
+						const queueName = typeof data.queue === "string" ? data.queue.slice(0, 200) : "";
+						if (!queueName) {
+							sendTo(client, { type: "ack", reqId, ok: false, code: "INVALID_QUEUE" });
+							return;
+						}
+
+						// Deliberately does NOT join the queue - just a read-only peek.
+						const entries = queues.get(gameId)?.get(queueName);
+						sendTo(client, {
+							type: "ack",
+							reqId,
+							ok: true,
+							queue: queueName,
+							waiting: entries ? entries.length : 0
+						});
 						return;
 					}
 				}
