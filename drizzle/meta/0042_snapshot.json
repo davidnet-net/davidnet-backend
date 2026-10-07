@@ -1,5 +1,5 @@
 {
-  "id": "c6a4d389-2567-414b-80c4-9a072269f0d7",
+  "id": "5ff2951d-e1a3-48cc-b2f2-1a4953dd3d21",
   "prevId": "232a3fc4-28ea-4025-bac1-22abd4fda98d",
   "version": "7",
   "dialect": "postgresql",
@@ -654,19 +654,21 @@
           "notNull": true,
           "default": "'private'"
         },
-        "achievements_visible": {
-          "name": "achievements_visible",
-          "type": "boolean",
+        "achievements_visibility": {
+          "name": "achievements_visibility",
+          "type": "visibility_type",
+          "typeSchema": "auth",
           "primaryKey": false,
           "notNull": true,
-          "default": true
+          "default": "'public'"
         },
-        "leaderboard_visible": {
-          "name": "leaderboard_visible",
-          "type": "boolean",
+        "leaderboard_visibility": {
+          "name": "leaderboard_visibility",
+          "type": "visibility_type",
+          "typeSchema": "auth",
           "primaryKey": false,
           "notNull": true,
-          "default": true
+          "default": "'public'"
         }
       },
       "indexes": {},

@@ -73,8 +73,8 @@ profile.get("/", collectAuth, async (c) => {
 			timezoneVisibility: userPrivacyPreferences.timezoneVisibility,
 			locationVisibility: userPrivacyPreferences.locationVisibility,
 			emailVisibility: userPrivacyPreferences.emailVisibility,
-			achievementsVisible: userPrivacyPreferences.achievementsVisible,
-			leaderboardVisible: userPrivacyPreferences.leaderboardVisible,
+			achievementsVisibility: userPrivacyPreferences.achievementsVisibility,
+			leaderboardVisibility: userPrivacyPreferences.leaderboardVisibility,
 
 			isInternal: internalAccess.internalAccess,
 			bannedUntil: accountModerationStatus.bannedUntil
@@ -139,8 +139,8 @@ profile.get("/", collectAuth, async (c) => {
 		isInternal: Boolean(targetUser.isInternal),
 		// These two are settings, not personal data - always visible so a viewer (or the community
 		// games service) knows whether to bother showing achievements/leaderboard placement at all.
-		achievementsVisible: targetUser.achievementsVisible ?? true,
-		leaderboardVisible: targetUser.leaderboardVisible ?? true
+		achievementsVisibility: targetUser.achievementsVisibility ?? "public",
+		leaderboardVisibility: targetUser.leaderboardVisibility ?? "public"
 	};
 
 	return c.json({ success: true, code: "SUCCESS", profileResponse });
@@ -260,15 +260,15 @@ profile.patch("/", requireAuth, async (c) => {
 			return c.json({ success: false, code: "INVALID_VISIBILITY_OPTION" }, 400);
 		privacyUpdates.emailVisibility = body.emailVisibility;
 	}
-	if (body.achievementsVisible !== undefined) {
-		if (typeof body.achievementsVisible !== "boolean")
-			return c.json({ success: false, code: "INVALID_ACHIEVEMENTS_VISIBLE" }, 400);
-		privacyUpdates.achievementsVisible = body.achievementsVisible;
+	if (body.achievementsVisibility !== undefined) {
+		if (!validVisibilities.includes(body.achievementsVisibility))
+			return c.json({ success: false, code: "INVALID_VISIBILITY_OPTION" }, 400);
+		privacyUpdates.achievementsVisibility = body.achievementsVisibility;
 	}
-	if (body.leaderboardVisible !== undefined) {
-		if (typeof body.leaderboardVisible !== "boolean")
-			return c.json({ success: false, code: "INVALID_LEADERBOARD_VISIBLE" }, 400);
-		privacyUpdates.leaderboardVisible = body.leaderboardVisible;
+	if (body.leaderboardVisibility !== undefined) {
+		if (!validVisibilities.includes(body.leaderboardVisibility))
+			return c.json({ success: false, code: "INVALID_VISIBILITY_OPTION" }, 400);
+		privacyUpdates.leaderboardVisibility = body.leaderboardVisibility;
 	}
 
 	try {

@@ -1252,8 +1252,10 @@ communityGamesRoute.get("/achievements/mine", requireAuth, async (c) => {
 
 // --- 2B. GET A SPECIFIC PLAYER'S CROSS-GAME ACHIEVEMENTS (defaults to yourself) ---
 // Same shape as /achievements/mine, but for any player - used by the account app's profile page
-// to show someone else's trophy case. Gated by that player's achievementsVisible privacy
-// preference (defaults to true/public); viewing your own is always allowed regardless of it.
+// to show someone else's trophy case. Gated by that player's achievementsVisibility privacy
+// preference (same visibilityEnum as language/timezone/etc, defaults to "public"); only "public"
+// counts as viewable by someone else, matching the canView convention in /auth/profile. Viewing
+// your own is always allowed regardless of it.
 communityGamesRoute.get("/achievements", collectAuth, async (c) => {
 	const requestingUserId = c.get("user")?.id;
 	const targetUserId = c.req.query("user") ?? requestingUserId;
@@ -1267,13 +1269,13 @@ communityGamesRoute.get("/achievements", collectAuth, async (c) => {
 	try {
 		if (!isOwn) {
 			const [privacy] = await database
-				.select({ achievementsVisible: userPrivacyPreferences.achievementsVisible })
+				.select({ achievementsVisibility: userPrivacyPreferences.achievementsVisibility })
 				.from(userPrivacyPreferences)
 				.where(eq(userPrivacyPreferences.userId, targetUserId))
 				.limit(1);
 
 			// Fail open (visible) if the row is somehow missing rather than erroring out.
-			if (privacy && !privacy.achievementsVisible) {
+			if (privacy && privacy.achievementsVisibility !== "public") {
 				c.header("Cache-Control", "no-store");
 				return c.json({ success: true, code: "SUCCESS", visible: false, achievements: [] });
 			}
@@ -1798,8 +1800,8 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 
 	try {
 		// Flagged scores are under review and excluded from everyone's public leaderboard view.
-		// Players who opted out of leaderboardVisible are excluded too (their own score below is
-		// unaffected - that toggle only controls whether OTHERS see them on the list).
+		// Players whose leaderboardVisibility isn't "public" are excluded too (their own score below
+		// is unaffected - that setting only controls whether OTHERS see them on the list).
 		const leaderboard = await database
 			.select({
 				userId: communityGameHighscores.userId,
@@ -1831,7 +1833,7 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 					eq(communityGameHighscores.category, category),
 					eq(communityGameHighscores.flagged, false),
 					// Fail open (visible) if the privacy row is somehow missing.
-					sql`coalesce(${userPrivacyPreferences.leaderboardVisible}, true) = true`
+					sql`coalesce(${userPrivacyPreferences.leaderboardVisibility}, 'public') = 'public'`
 				)
 			)
 			.orderBy(desc(communityGameHighscores.score))
