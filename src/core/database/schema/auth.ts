@@ -73,7 +73,13 @@ export const userPrivacyPreferences = authSchema.table("user_privacy_preferences
 	languageVisibility: visibilityEnum("language_visibility").default("private").notNull(),
 	timezoneVisibility: visibilityEnum("timezone_visibility").default("private").notNull(),
 	locationVisibility: visibilityEnum("location_visibility").default("private").notNull(),
-	emailVisibility: visibilityEnum("email_visibility").default("private").notNull()
+	emailVisibility: visibilityEnum("email_visibility").default("private").notNull(),
+	// Community games: whether other players can see your unlocked achievements on your profile.
+	// Defaults to true (public) - unlike the fields above, this is an opt-OUT setting.
+	achievementsVisible: boolean("achievements_visible").default(true).notNull(),
+	// Community games: whether you appear in other players' view of a game's leaderboard. Your own
+	// score/rank still shows to yourself when this is off. Defaults to true (public).
+	leaderboardVisible: boolean("leaderboard_visible").default(true).notNull()
 });
 
 export const sessionTokens = authSchema.table("session_tokens", {

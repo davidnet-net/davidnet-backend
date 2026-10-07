@@ -73,6 +73,8 @@ profile.get("/", collectAuth, async (c) => {
 			timezoneVisibility: userPrivacyPreferences.timezoneVisibility,
 			locationVisibility: userPrivacyPreferences.locationVisibility,
 			emailVisibility: userPrivacyPreferences.emailVisibility,
+			achievementsVisible: userPrivacyPreferences.achievementsVisible,
+			leaderboardVisible: userPrivacyPreferences.leaderboardVisible,
 
 			isInternal: internalAccess.internalAccess,
 			bannedUntil: accountModerationStatus.bannedUntil
@@ -134,7 +136,11 @@ profile.get("/", collectAuth, async (c) => {
 		timezone: canView(targetUser.timezoneVisibility) ? targetUser.timezone : undefined,
 		email: canView(targetUser.emailVisibility) ? targetUser.email : undefined,
 		connectionsCount: acceptedConnectionsCount,
-		isInternal: Boolean(targetUser.isInternal)
+		isInternal: Boolean(targetUser.isInternal),
+		// These two are settings, not personal data - always visible so a viewer (or the community
+		// games service) knows whether to bother showing achievements/leaderboard placement at all.
+		achievementsVisible: targetUser.achievementsVisible ?? true,
+		leaderboardVisible: targetUser.leaderboardVisible ?? true
 	};
 
 	return c.json({ success: true, code: "SUCCESS", profileResponse });
@@ -254,6 +260,16 @@ profile.patch("/", requireAuth, async (c) => {
 			return c.json({ success: false, code: "INVALID_VISIBILITY_OPTION" }, 400);
 		privacyUpdates.emailVisibility = body.emailVisibility;
 	}
+	if (body.achievementsVisible !== undefined) {
+		if (typeof body.achievementsVisible !== "boolean")
+			return c.json({ success: false, code: "INVALID_ACHIEVEMENTS_VISIBLE" }, 400);
+		privacyUpdates.achievementsVisible = body.achievementsVisible;
+	}
+	if (body.leaderboardVisible !== undefined) {
+		if (typeof body.leaderboardVisible !== "boolean")
+			return c.json({ success: false, code: "INVALID_LEADERBOARD_VISIBLE" }, 400);
+		privacyUpdates.leaderboardVisible = body.leaderboardVisible;
+	}
 
 	try {
 		if (Object.keys(userUpdates).length > 0) {
@@ -327,7 +343,9 @@ async function handleImageUpload(c: any, type: "avatar" | "banner") {
 
 		await database.update(users).set(updateData).where(eq(users.userId, userId));
 
-		void notifyActivity("✏️ Account updated", userId, { "Changed fields": type === "avatar" ? "avatarUrl" : "bannerUrl" });
+		void notifyActivity("✏️ Account updated", userId, {
+			"Changed fields": type === "avatar" ? "avatarUrl" : "bannerUrl"
+		});
 
 		return c.json({
 			success: true,

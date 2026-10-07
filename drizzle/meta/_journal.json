@@ -295,6 +295,13 @@
       "when": 1791375246888,
       "tag": "0041_many_demogoblin",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1791393514429,
+      "tag": "0042_married_wolfsbane",
+      "breakpoints": true
     }
   ]
 }

@@ -1,5 +1,14 @@
 import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
-import { bigint, boolean, integer, jsonb, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+	bigint,
+	boolean,
+	integer,
+	jsonb,
+	primaryKey,
+	text,
+	timestamp,
+	uuid
+} from "drizzle-orm/pg-core";
 
 import { authSchema, users } from "./auth";
 
@@ -191,6 +200,24 @@ export const communityGameSessions = authSchema.table("community_game_sessions",
 	expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
 });
 
+// Accumulated playtime for a player in a community game. Incremented by small deltas reported by
+// the player page while the game's iframe is actually visible (see the /playtime/ping route) -
+// there is no separate session-end step, so a tab close only loses at most one ping interval.
+export const communityGamePlaytime = authSchema.table(
+	"community_game_playtime",
+	{
+		gameId: uuid("game_id")
+			.notNull()
+			.references(() => communityGame.id, { onDelete: "cascade" }),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.userId, { onDelete: "cascade" }),
+		totalPlaytimeMs: bigint("total_playtime_ms", { mode: "number" }).default(0).notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.gameId, table.userId] })]
+);
+
 // Audit trail of creator/moderator actions performed on a player's save or highscore data.
 export const communityGameAuditLog = authSchema.table("community_game_audit_log", {
 	id: uuid("id")
@@ -233,3 +260,6 @@ export type NewCommunityGameAuditLog = InferInsertModel<typeof communityGameAudi
 
 export type CommunityGameSession = InferSelectModel<typeof communityGameSessions>;
 export type NewCommunityGameSession = InferInsertModel<typeof communityGameSessions>;
+
+export type CommunityGamePlaytime = InferSelectModel<typeof communityGamePlaytime>;
+export type NewCommunityGamePlaytime = InferInsertModel<typeof communityGamePlaytime>;

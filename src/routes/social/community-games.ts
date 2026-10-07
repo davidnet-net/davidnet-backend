@@ -12,11 +12,14 @@ import {
 	communityGameHighscores,
 	communityGameLevels,
 	communityGameLikes,
+	communityGamePlaytime,
 	communityGameSaves,
 	communityGameSessions,
 	DEFAULT_LEADERBOARD_CATEGORY,
 	DEFAULT_SAVE_SLOT,
 	internalAccess,
+	userPreferences,
+	userPrivacyPreferences,
 	users
 } from "../../core/database/schema/schema";
 import { notifyActivity, contentUrlFor } from "../../core/shared/activityWebhook";
@@ -26,6 +29,7 @@ import {
 	listBucketObjects,
 	uploadToBucket
 } from "../../core/shared/s3";
+import { collectAuth } from "../../middlewares/collectAuth";
 import { type Env, requireAuth } from "../../middlewares/requireAuth";
 
 export const communityGamesRoute = new Hono<Env>();
@@ -108,6 +112,12 @@ const MIN_SESSION_AGE_MS = 1_500;
 // many candidate scores in rapid succession to find one that slips under the anomaly threshold.
 const MIN_SUBMIT_INTERVAL_MS = 2_000;
 const HEX_PATTERN = /^[0-9a-f]+$/i;
+
+// --- PLAYTIME ---
+// A single ping can only move the total forward by this much, regardless of what the client
+// claims - the player page pings roughly every 30s of visible playtime, so this just needs enough
+// headroom for a throttled background tab to catch up, not to trust the client's own clock.
+const MAX_PLAYTIME_PING_MS = 2 * 60 * 1000;
 
 // --- ANTI-CHEAT: anomaly flagging ---
 // A new score that blows way past the current (unflagged) leaderboard top gets stored but
@@ -1232,9 +1242,95 @@ communityGamesRoute.get("/achievements/mine", requireAuth, async (c) => {
 			)
 			.orderBy(desc(communityGameAchievements.completedAt));
 
+		c.header("Cache-Control", "no-store");
 		return c.json({ success: true, code: "SUCCESS", achievements });
 	} catch (error) {
 		console.error("Failed to fetch achievements:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 2B. GET A SPECIFIC PLAYER'S CROSS-GAME ACHIEVEMENTS (defaults to yourself) ---
+// Same shape as /achievements/mine, but for any player - used by the account app's profile page
+// to show someone else's trophy case. Gated by that player's achievementsVisible privacy
+// preference (defaults to true/public); viewing your own is always allowed regardless of it.
+communityGamesRoute.get("/achievements", collectAuth, async (c) => {
+	const requestingUserId = c.get("user")?.id;
+	const targetUserId = c.req.query("user") ?? requestingUserId;
+
+	if (!targetUserId) {
+		return c.json({ success: false, code: "MISSING_USER" }, 400);
+	}
+
+	const isOwn = requestingUserId === targetUserId;
+
+	try {
+		if (!isOwn) {
+			const [privacy] = await database
+				.select({ achievementsVisible: userPrivacyPreferences.achievementsVisible })
+				.from(userPrivacyPreferences)
+				.where(eq(userPrivacyPreferences.userId, targetUserId))
+				.limit(1);
+
+			// Fail open (visible) if the row is somehow missing rather than erroring out.
+			if (privacy && !privacy.achievementsVisible) {
+				c.header("Cache-Control", "no-store");
+				return c.json({ success: true, code: "SUCCESS", visible: false, achievements: [] });
+			}
+		}
+
+		const achievements = await database
+			.select({
+				gameId: communityGameAchievements.gameId,
+				gameTitle: communityGame.title,
+				gameIconFilename: communityGame.iconFilename,
+				achievementId: communityGameAchievements.achievementId,
+				name: communityGameAchievements.name,
+				description: communityGameAchievements.description,
+				icon: communityGameAchievements.icon,
+				unlockedAt: communityGameAchievements.completedAt
+			})
+			.from(communityGameAchievements)
+			.innerJoin(communityGame, eq(communityGameAchievements.gameId, communityGame.id))
+			.where(
+				and(
+					eq(communityGameAchievements.userId, targetUserId),
+					isNotNull(communityGameAchievements.completedAt)
+				)
+			)
+			.orderBy(desc(communityGameAchievements.completedAt));
+
+		c.header("Cache-Control", "no-store");
+		return c.json({ success: true, code: "SUCCESS", visible: true, achievements });
+	} catch (error) {
+		console.error("Failed to fetch achievements:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 2C. GET MY TOTAL PLAYTIME ACROSS ALL COMMUNITY GAMES ---
+communityGamesRoute.get("/playtime/total", requireAuth, async (c) => {
+	const userId = c.get("user").id;
+
+	try {
+		const rows = await database
+			.select({
+				gameId: communityGamePlaytime.gameId,
+				gameTitle: communityGame.title,
+				gameIconFilename: communityGame.iconFilename,
+				totalPlaytimeMs: communityGamePlaytime.totalPlaytimeMs
+			})
+			.from(communityGamePlaytime)
+			.innerJoin(communityGame, eq(communityGamePlaytime.gameId, communityGame.id))
+			.where(eq(communityGamePlaytime.userId, userId))
+			.orderBy(desc(communityGamePlaytime.totalPlaytimeMs));
+
+		const totalPlaytimeMs = rows.reduce((sum, row) => sum + row.totalPlaytimeMs, 0);
+
+		c.header("Cache-Control", "no-store");
+		return c.json({ success: true, code: "SUCCESS", totalPlaytimeMs, games: rows });
+	} catch (error) {
+		console.error("Failed to fetch total playtime:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
 	}
 });
@@ -1675,6 +1771,7 @@ communityGamesRoute.get("/:id/highscores/categories", requireAuth, async (c) => 
 			.where(eq(communityGameHighscores.gameId, gameId))
 			.orderBy(communityGameHighscores.category);
 
+		c.header("Cache-Control", "no-store");
 		return c.json({
 			success: true,
 			code: "SUCCESS",
@@ -1701,21 +1798,40 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 
 	try {
 		// Flagged scores are under review and excluded from everyone's public leaderboard view.
+		// Players who opted out of leaderboardVisible are excluded too (their own score below is
+		// unaffected - that toggle only controls whether OTHERS see them on the list).
 		const leaderboard = await database
 			.select({
 				userId: communityGameHighscores.userId,
 				score: communityGameHighscores.score,
 				username: users.username,
 				displayName: users.displayName,
-				avatarUrl: users.avatarUrl
+				avatarUrl: users.avatarUrl,
+				language: userPreferences.language,
+				languageVisibility: userPrivacyPreferences.languageVisibility,
+				playtimeMs: communityGamePlaytime.totalPlaytimeMs
 			})
 			.from(communityGameHighscores)
 			.innerJoin(users, eq(communityGameHighscores.userId, users.userId))
+			.leftJoin(userPreferences, eq(communityGameHighscores.userId, userPreferences.userId))
+			.leftJoin(
+				userPrivacyPreferences,
+				eq(communityGameHighscores.userId, userPrivacyPreferences.userId)
+			)
+			.leftJoin(
+				communityGamePlaytime,
+				and(
+					eq(communityGamePlaytime.gameId, gameId),
+					eq(communityGamePlaytime.userId, communityGameHighscores.userId)
+				)
+			)
 			.where(
 				and(
 					eq(communityGameHighscores.gameId, gameId),
 					eq(communityGameHighscores.category, category),
-					eq(communityGameHighscores.flagged, false)
+					eq(communityGameHighscores.flagged, false),
+					// Fail open (visible) if the privacy row is somehow missing.
+					sql`coalesce(${userPrivacyPreferences.leaderboardVisible}, true) = true`
 				)
 			)
 			.orderBy(desc(communityGameHighscores.score))
@@ -1733,8 +1849,14 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 			)
 			.limit(1);
 
-		const rankedLeaderboard = leaderboard.map((row, index) => ({ ...row, rank: index + 1 }));
+		const rankedLeaderboard = leaderboard.map(({ languageVisibility, ...row }, index) => ({
+			...row,
+			rank: index + 1,
+			language: languageVisibility === "public" ? row.language : null,
+			playtimeMs: row.playtimeMs ?? 0
+		}));
 
+		c.header("Cache-Control", "no-store");
 		return c.json({
 			success: true,
 			code: "SUCCESS",
@@ -1746,6 +1868,81 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 		});
 	} catch (error) {
 		console.error("Failed to fetch highscores:", error);
+		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
+	}
+});
+
+// --- 10B. ADD PLAYTIME (own total for one game) ---
+// Called periodically by the player page while the game's iframe is visible, reporting the
+// elapsed ms since its last ping. There is no session end/start pair for this - just small,
+// clamped increments, so a tab close loses at most one ping interval of playtime.
+communityGamesRoute.post("/:id/playtime/ping", requireAuth, async (c) => {
+	const user = c.get("user");
+	if (await checkIfBanned(user.id, c)) {
+		return c.json({ success: false, code: "BANNED" }, 403);
+	}
+
+	const gameId = c.req.param("id");
+	let body;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ success: false, code: "INVALID_JSON" }, 400);
+	}
+
+	const deltaMs = Number(body.deltaMs);
+	if (!Number.isFinite(deltaMs) || deltaMs <= 0) {
+		return c.json({ success: false, code: "INVALID_DELTA" }, 400);
+	}
+	const clampedDelta = Math.min(deltaMs, MAX_PLAYTIME_PING_MS);
+
+	try {
+		const [game] = await database
+			.select({ id: communityGame.id })
+			.from(communityGame)
+			.where(eq(communityGame.id, gameId))
+			.limit(1);
+
+		if (!game) return c.json({ success: false, code: "GAME_NOT_FOUND" }, 404);
+
+		const [row] = await database
+			.insert(communityGamePlaytime)
+			.values({ gameId, userId: user.id, totalPlaytimeMs: clampedDelta })
+			.onConflictDoUpdate({
+				target: [communityGamePlaytime.gameId, communityGamePlaytime.userId],
+				set: {
+					totalPlaytimeMs: sql`${communityGamePlaytime.totalPlaytimeMs} + ${clampedDelta}`,
+					updatedAt: new Date()
+				}
+			})
+			.returning({ totalPlaytimeMs: communityGamePlaytime.totalPlaytimeMs });
+
+		c.header("Cache-Control", "no-store");
+		return c.json({ success: true, code: "SUCCESS", totalPlaytimeMs: row.totalPlaytimeMs });
+	} catch (error) {
+		console.error("Failed to add playtime:", error);
+		return c.json({ success: false, code: "PLAYTIME_FAILED" }, 500);
+	}
+});
+
+// --- 10C. GET MY PLAYTIME FOR ONE GAME ---
+communityGamesRoute.get("/:id/playtime", requireAuth, async (c) => {
+	const user = c.get("user");
+	const gameId = c.req.param("id");
+
+	try {
+		const [row] = await database
+			.select({ totalPlaytimeMs: communityGamePlaytime.totalPlaytimeMs })
+			.from(communityGamePlaytime)
+			.where(
+				and(eq(communityGamePlaytime.gameId, gameId), eq(communityGamePlaytime.userId, user.id))
+			)
+			.limit(1);
+
+		c.header("Cache-Control", "no-store");
+		return c.json({ success: true, code: "SUCCESS", totalPlaytimeMs: row?.totalPlaytimeMs ?? 0 });
+	} catch (error) {
+		console.error("Failed to fetch playtime:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
 	}
 });

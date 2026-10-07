@@ -26,6 +26,8 @@ privacy.get("/preferences", requireAuth, async (c) => {
 		languageVisibility: p.languageVisibility,
 		timezoneVisibility: p.timezoneVisibility,
 		locationVisibility: p.locationVisibility,
-		emailVisibility: p.emailVisibility
+		emailVisibility: p.emailVisibility,
+		achievementsVisible: p.achievementsVisible,
+		leaderboardVisible: p.leaderboardVisible
 	});
 });
