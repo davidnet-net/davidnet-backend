@@ -325,6 +325,8 @@ async function handleImageUpload(c: any, type: "avatar" | "banner") {
 
 		await database.update(users).set(updateData).where(eq(users.userId, userId));
 
+		void notifyActivity("✏️ Account updated", userId, { "Changed fields": type === "avatar" ? "avatarUrl" : "bannerUrl" });
+
 		return c.json({
 			success: true,
 			code: `${type.toUpperCase()}_UPDATED`,
