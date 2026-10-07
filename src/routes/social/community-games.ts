@@ -2495,6 +2495,9 @@ communityGamesRoute.get("/:id/file/*", async (c) => {
 		// blindly trusting a stale cached copy for a full day after an update.
 		const etag = s3Object.ETag;
 		if (etag && c.req.header("If-None-Match") === etag) {
+			// Discard the unread body, otherwise its socket stays checked out of the S3 pool and
+			// repeated revalidations eventually exhaust it, stalling every S3 read.
+			(s3Object.Body as { destroy?: () => void }).destroy?.();
 			return c.body(null, 304);
 		}
 

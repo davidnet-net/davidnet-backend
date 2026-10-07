@@ -12,6 +12,12 @@ export const s3 = new S3Client({
 	// (e.g. http://localhost:3900) to point at the local docker-compose Garage instead.
 	endpoint: process.env.GARAGE_ENDPOINT || "http://garage.garage.svc.cluster.local:3900",
 	forcePathStyle: true,
+	// Without timeouts a stalled/abandoned connection holds one of the pool's sockets forever,
+	// and once all are held every S3 read (avatars, banners, game files...) queues indefinitely.
+	requestHandler: {
+		connectionTimeout: 5_000,
+		requestTimeout: 60_000
+	},
 	credentials: {
 		accessKeyId: process.env.GARAGE_ACCESS_KEY!,
 		secretAccessKey: process.env.GARAGE_SECRET_KEY!
