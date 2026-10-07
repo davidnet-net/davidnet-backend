@@ -93,9 +93,11 @@ profile.get("/", collectAuth, async (c) => {
 
 	const isOwnProfile = requestingUserId === targetUser.userId;
 	const isBanned = Boolean(targetUser.bannedUntil && new Date(targetUser.bannedUntil) > new Date());
+	const isRequesterModerator = requestingUserId ? await isModerator(requestingUserId) : false;
 
-	// Banned users' profiles are hidden from everyone except themselves.
-	if (isBanned && !isOwnProfile) {
+	// Banned users' profiles are hidden from everyone except themselves and moderators, who need
+	// to be able to pull up a banned account's profile from the moderation screens.
+	if (isBanned && !isOwnProfile && !isRequesterModerator) {
 		return c.json({ error: "User not found" }, 404);
 	}
 
