@@ -1467,6 +1467,8 @@ communityGamesRoute.delete("/:id", requireAuth, async (c) => {
 
 		await database.delete(communityGame).where(eq(communityGame.id, gameId));
 
+		void notifyActivity("🗑️ Community game deleted", userId, { "Game ID": gameId, Title: game.title });
+
 		return c.json({ success: true, code: "GAME_DELETED" });
 	} catch (error) {
 		console.error("Failed to delete game:", error);
