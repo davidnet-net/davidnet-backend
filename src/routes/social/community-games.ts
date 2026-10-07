@@ -1,6 +1,6 @@
 import AdmZip from "adm-zip";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
-import { and, desc, eq, inArray,sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 
 import { database } from "../../core/database/client";
@@ -17,7 +17,12 @@ import {
 	internalAccess,
 	users
 } from "../../core/database/schema/schema";
-import { deleteFromBucket,getFromBucket, listBucketObjects,uploadToBucket } from "../../core/shared/s3";
+import {
+	deleteFromBucket,
+	getFromBucket,
+	listBucketObjects,
+	uploadToBucket
+} from "../../core/shared/s3";
 import { type Env, requireAuth } from "../../middlewares/requireAuth";
 import { notifyActivity } from "../../core/shared/activityWebhook";
 
@@ -152,9 +157,7 @@ async function canManageGame(gameId: string, userId: string): Promise<boolean> {
 // Reads only the zip's central-directory metadata (entry count, names, declared sizes) - none of
 // this decompresses anything, so it's cheap to run as a precheck before the real upload/update
 // work (which does decompress each entry via entry.getData()).
-type ZipValidationResult =
-	| { success: true }
-	| { success: false; code: string; message: string };
+type ZipValidationResult = { success: true } | { success: false; code: string; message: string };
 
 function validateGameZip(zip: AdmZip): ZipValidationResult {
 	const entries = zip.getEntries();
@@ -290,7 +293,10 @@ async function verifyGameSession(params: {
 
 	// Cooldown between accepted submissions, so a script can't rapid-fire candidate scores to probe
 	// where the anomaly threshold sits.
-	if (session.lastSignedTimestamp > 0 && timestamp - session.lastSignedTimestamp < MIN_SUBMIT_INTERVAL_MS) {
+	if (
+		session.lastSignedTimestamp > 0 &&
+		timestamp - session.lastSignedTimestamp < MIN_SUBMIT_INTERVAL_MS
+	) {
 		return { valid: false, code: "RATE_LIMITED" };
 	}
 
@@ -747,7 +753,12 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 		// that happened to be packaged inside the zip.
 		if (iconFile instanceof File && iconFilename) {
 			const iconBuffer = Buffer.from(await iconFile.arrayBuffer());
-			await uploadToBucket("communitygames", `${gameId}/${iconFilename}`, iconBuffer, iconFile.type);
+			await uploadToBucket(
+				"communitygames",
+				`${gameId}/${iconFilename}`,
+				iconBuffer,
+				iconFile.type
+			);
 		}
 
 		if (!hasIndexHtml) {
@@ -774,10 +785,12 @@ communityGamesRoute.post("/upload", requireAuth, async (c) => {
 	}
 });
 
-// --- 1B. UPDATE COMMUNITY GAME (replace the uploaded zip) ---
-// Creator-only (same bar as deleting the game). Re-runs the exact same zip validation + SDK
-// injection as the initial upload - keep this in sync with "--- 1. UPLOAD COMMUNITY GAME ---"
-// above if that logic ever changes. The icon is left untouched; it's managed separately.
+// --- 1B. UPDATE COMMUNITY GAME (files and/or metadata) ---
+// Creator-only (same bar as deleting the game). Every field is optional and independent - a
+// request can replace just the zip, just the icon, just the title/description/AI-disclosure, or
+// any combination. The zip-replace path re-runs the exact same zip validation + SDK injection as
+// the initial upload - keep that in sync with "--- 1. UPLOAD COMMUNITY GAME ---" above if that
+// logic ever changes.
 communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
 	const userId = c.get("user").id;
 
@@ -797,13 +810,18 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
 	if (existingGame.userId !== userId) return c.json({ success: false, code: "FORBIDDEN" }, 403);
 
 	const body = await c.req.parseBody();
-	const file = body["game"];
+	const file = body["game"] as string | File | undefined;
+	const title = body["title"] as string | File | undefined;
+	const description = body["description"] as string | File | undefined;
+	const iconFile = body["icon"] as string | File | undefined;
+	const isAiGeneratedRaw = body["isAiGenerated"] as string | File | undefined;
 
-	if (!file || !(file instanceof File)) {
+	if (file !== undefined && !(file instanceof File)) {
 		return c.json({ success: false, code: "MISSING_ZIP_FILE" }, 400);
 	}
 
 	if (
+		file instanceof File &&
 		!file.name.endsWith(".zip") &&
 		file.type !== "application/zip" &&
 		file.type !== "application/x-zip-compressed"
@@ -814,72 +832,109 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
 		);
 	}
 
-	if (file.size > MAX_GAME_ZIP_SIZE_BYTES) {
+	if (file instanceof File && file.size > MAX_GAME_ZIP_SIZE_BYTES) {
 		return c.json({ success: false, code: "ZIP_TOO_LARGE" }, 400);
 	}
 
+	if (title !== undefined && (typeof title !== "string" || title.trim().length === 0)) {
+		return c.json({ success: false, code: "MISSING_TITLE" }, 400);
+	}
+
+	if (description !== undefined && typeof description !== "string") {
+		return c.json({ success: false, code: "INVALID_DESCRIPTION" }, 400);
+	}
+
+	// New icon filename to persist, or undefined if the icon isn't being changed in this request.
+	let newIconFilename: string | undefined = undefined;
+	if (iconFile !== undefined) {
+		if (!(iconFile instanceof File)) {
+			return c.json({ success: false, code: "INVALID_ICON_FILE" }, 400);
+		}
+
+		if (!ALLOWED_ICON_TYPES.includes(iconFile.type)) {
+			return c.json({ success: false, code: "INVALID_ICON_TYPE" }, 400);
+		}
+
+		if (iconFile.size > MAX_ICON_SIZE_BYTES) {
+			return c.json({ success: false, code: "ICON_TOO_LARGE" }, 400);
+		}
+
+		newIconFilename = `icon.${iconFile.type.split("/")[1]}`;
+	}
+
+	if (
+		!(file instanceof File) &&
+		title === undefined &&
+		description === undefined &&
+		newIconFilename === undefined &&
+		isAiGeneratedRaw === undefined
+	) {
+		return c.json({ success: false, code: "NOTHING_TO_UPDATE" }, 400);
+	}
+
 	try {
-		// Validate the zip BEFORE deleting any existing files, so a bad upload can't take down an
-		// already-working game.
-		const precheckZip = new AdmZip(Buffer.from(await file.arrayBuffer()));
-		const hasIndexHtmlEntry = precheckZip
-			.getEntries()
-			.some((entry) => entry.entryName === "index.html");
-
-		if (!hasIndexHtmlEntry) {
-			return c.json(
-				{
-					success: false,
-					code: "MISSING_INDEX_HTML",
-					message: "ZIP must contain an index.html at the root."
-				},
-				400
-			);
-		}
-
-		const zipValidation = validateGameZip(precheckZip);
-		if (!zipValidation.success) {
-			return c.json(
-				{ success: false, code: zipValidation.code, message: zipValidation.message },
-				400
-			);
-		}
-
-		// Remove the previous version's files (except the icon, which is managed separately) so
-		// stale files the new zip doesn't include don't linger and stay servable.
-		const existingKeys = await listBucketObjects("communitygames", `${gameId}/`);
-		const iconKey = existingGame.iconFilename ? `${gameId}/${existingGame.iconFilename}` : null;
-		await deleteFromBucket(
-			"communitygames",
-			existingKeys.filter((key) => key !== iconKey)
-		);
-
-		// Already fully parsed above (and validated) - no need to re-read the file or re-parse it.
-		const zip = precheckZip;
-		const zipEntries = zip.getEntries();
-
 		let hasIndexHtml = false;
 
-		const uploadPromises = zipEntries.map(async (entry) => {
-			if (entry.isDirectory) return;
+		if (file instanceof File) {
+			// Validate the zip BEFORE deleting any existing files, so a bad upload can't take down an
+			// already-working game.
+			const precheckZip = new AdmZip(Buffer.from(await file.arrayBuffer()));
+			const hasIndexHtmlEntry = precheckZip
+				.getEntries()
+				.some((entry) => entry.entryName === "index.html");
 
-			const filePath = entry.entryName;
-			if (filePath === "index.html") hasIndexHtml = true;
+			if (!hasIndexHtmlEntry) {
+				return c.json(
+					{
+						success: false,
+						code: "MISSING_INDEX_HTML",
+						message: "ZIP must contain an index.html at the root."
+					},
+					400
+				);
+			}
 
-			// Use 'let' so we can overwrite fileData if it's an HTML file
-			let fileData = entry.getData();
-			const s3Key = `${gameId}/${filePath}`;
+			const zipValidation = validateGameZip(precheckZip);
+			if (!zipValidation.success) {
+				return c.json(
+					{ success: false, code: zipValidation.code, message: zipValidation.message },
+					400
+				);
+			}
 
-			let contentType = "application/octet-stream";
+			// Remove the previous version's files (except the icon, which is managed separately below)
+			// so stale files the new zip doesn't include don't linger and stay servable.
+			const existingKeys = await listBucketObjects("communitygames", `${gameId}/`);
+			const iconKey = existingGame.iconFilename ? `${gameId}/${existingGame.iconFilename}` : null;
+			await deleteFromBucket(
+				"communitygames",
+				existingKeys.filter((key) => key !== iconKey)
+			);
 
-			// Inject LocalStorage Polyfill into HTML files
-			if (filePath.endsWith(".html")) {
-				contentType = "text/html";
+			// Already fully parsed above (and validated) - no need to re-read the file or re-parse it.
+			const zip = precheckZip;
+			const zipEntries = zip.getEntries();
 
-				let htmlContent = fileData.toString("utf-8");
+			const uploadPromises = zipEntries.map(async (entry) => {
+				if (entry.isDirectory) return;
 
-				// Safe in-memory storage mock that prevents the game from crashing
-				const storagePolyfill = `
+				const filePath = entry.entryName;
+				if (filePath === "index.html") hasIndexHtml = true;
+
+				// Use 'let' so we can overwrite fileData if it's an HTML file
+				let fileData = entry.getData();
+				const s3Key = `${gameId}/${filePath}`;
+
+				let contentType = "application/octet-stream";
+
+				// Inject LocalStorage Polyfill into HTML files
+				if (filePath.endsWith(".html")) {
+					contentType = "text/html";
+
+					let htmlContent = fileData.toString("utf-8");
+
+					// Safe in-memory storage mock that prevents the game from crashing
+					const storagePolyfill = `
                 <script>
                     (function() {
                         try {
@@ -901,16 +956,16 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
                 </script>
                 `;
 
-				// SDK bridge: exposes window.DavidnetSDK.{applyHighscore,getHighscores,saveJsonBlob,getJsonBlob}
-				// by round-tripping postMessage calls through the parent player page, which holds the
-				// authenticated session the sandboxed iframe can never access directly.
-				//
-				// Anti-cheat: a per-session secret is fetched once from the server via "startSession" and
-				// kept only in this closure (never attached to window.DavidnetSDK). applyHighscore signs
-				// every submission with it (HMAC-SHA256), so a score can only be forged by code that runs
-				// inside this exact iframe session - not by postMessage calls crafted from the parent page's
-				// own devtools console using the secret-less global SDK object.
-				const gameSdkScript = `
+					// SDK bridge: exposes window.DavidnetSDK.{applyHighscore,getHighscores,saveJsonBlob,getJsonBlob}
+					// by round-tripping postMessage calls through the parent player page, which holds the
+					// authenticated session the sandboxed iframe can never access directly.
+					//
+					// Anti-cheat: a per-session secret is fetched once from the server via "startSession" and
+					// kept only in this closure (never attached to window.DavidnetSDK). applyHighscore signs
+					// every submission with it (HMAC-SHA256), so a score can only be forged by code that runs
+					// inside this exact iframe session - not by postMessage calls crafted from the parent page's
+					// own devtools console using the secret-less global SDK object.
+					const gameSdkScript = `
                 <script>
                     (function() {
                         try {
@@ -1168,54 +1223,74 @@ communityGamesRoute.put("/:id/upload", requireAuth, async (c) => {
                 </script>
                 `;
 
-				// Plaats de scripts direct na de <head> tag of helemaal bovenaan
-				if (htmlContent.toLowerCase().includes("<head>")) {
-					htmlContent = htmlContent.replace(
-						/<head>/i,
-						"<head>\n" + storagePolyfill + gameSdkScript
-					);
-				} else {
-					htmlContent = storagePolyfill + gameSdkScript + htmlContent;
+					// Plaats de scripts direct na de <head> tag of helemaal bovenaan
+					if (htmlContent.toLowerCase().includes("<head>")) {
+						htmlContent = htmlContent.replace(
+							/<head>/i,
+							"<head>\n" + storagePolyfill + gameSdkScript
+						);
+					} else {
+						htmlContent = storagePolyfill + gameSdkScript + htmlContent;
+					}
+
+					// Zet de aangepaste string weer om naar een Buffer voor S3
+					fileData = Buffer.from(htmlContent, "utf-8");
+				} else if (filePath.endsWith(".css")) {
+					contentType = "text/css";
+				} else if (filePath.endsWith(".js")) {
+					contentType = "application/javascript";
+				} else if (filePath.endsWith(".png")) {
+					contentType = "image/png";
+				} else if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) {
+					contentType = "image/jpeg";
+				} else if (filePath.endsWith(".mp3")) {
+					contentType = "audio/mpeg";
+				} else if (filePath.endsWith(".wav")) {
+					contentType = "audio/wav";
+				} else if (filePath.endsWith(".svg")) {
+					contentType = "image/svg+xml";
 				}
 
-				// Zet de aangepaste string weer om naar een Buffer voor S3
-				fileData = Buffer.from(htmlContent, "utf-8");
-			} else if (filePath.endsWith(".css")) {
-				contentType = "text/css";
-			} else if (filePath.endsWith(".js")) {
-				contentType = "application/javascript";
-			} else if (filePath.endsWith(".png")) {
-				contentType = "image/png";
-			} else if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) {
-				contentType = "image/jpeg";
-			} else if (filePath.endsWith(".mp3")) {
-				contentType = "audio/mpeg";
-			} else if (filePath.endsWith(".wav")) {
-				contentType = "audio/wav";
-			} else if (filePath.endsWith(".svg")) {
-				contentType = "image/svg+xml";
+				await uploadToBucket("communitygames", s3Key, fileData, contentType);
+			});
+
+			await Promise.all(uploadPromises);
+
+			if (!hasIndexHtml) {
+				return c.json(
+					{
+						success: false,
+						code: "MISSING_INDEX_HTML",
+						message: "ZIP must contain an index.html at the root."
+					},
+					400
+				);
+			}
+		}
+
+		// Icon replace: delete the old icon object (its filename/extension may differ from the new
+		// one) before uploading the new one, so no orphaned icon file is left behind in the bucket.
+		if (newIconFilename !== undefined && iconFile instanceof File) {
+			if (existingGame.iconFilename) {
+				await deleteFromBucket("communitygames", [`${gameId}/${existingGame.iconFilename}`]);
 			}
 
-			await uploadToBucket("communitygames", s3Key, fileData, contentType);
-		});
-
-		await Promise.all(uploadPromises);
-
-		if (!hasIndexHtml) {
-			return c.json(
-				{
-					success: false,
-					code: "MISSING_INDEX_HTML",
-					message: "ZIP must contain an index.html at the root."
-				},
-				400
+			const iconBuffer = Buffer.from(await iconFile.arrayBuffer());
+			await uploadToBucket(
+				"communitygames",
+				`${gameId}/${newIconFilename}`,
+				iconBuffer,
+				iconFile.type
 			);
 		}
 
-		await database
-			.update(communityGame)
-			.set({ updatedAt: new Date() })
-			.where(eq(communityGame.id, gameId));
+		const updateValues: Partial<typeof communityGame.$inferInsert> = { updatedAt: new Date() };
+		if (typeof title === "string") updateValues.title = title.trim();
+		if (typeof description === "string") updateValues.description = description.trim() || null;
+		if (isAiGeneratedRaw !== undefined) updateValues.isAiGenerated = isAiGeneratedRaw === "true";
+		if (newIconFilename !== undefined) updateValues.iconFilename = newIconFilename;
+
+		await database.update(communityGame).set(updateValues).where(eq(communityGame.id, gameId));
 
 		void notifyActivity("🎮 Community game updated", userId, {
 			"Game ID": gameId
@@ -1707,8 +1782,11 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 
 		const playerHighscore = isNewPersonalBest ? score : existing!.score;
 		const playerHighscoreFlagged = isNewPersonalBest ? isAnomalous : (existing?.flagged ?? false);
-		const isNewGlobalBest = !isAnomalous && (!prevGlobalTop || playerHighscore > prevGlobalTop.score);
-		const globalHighscore = isNewGlobalBest ? playerHighscore : (prevGlobalTop?.score ?? playerHighscore);
+		const isNewGlobalBest =
+			!isAnomalous && (!prevGlobalTop || playerHighscore > prevGlobalTop.score);
+		const globalHighscore = isNewGlobalBest
+			? playerHighscore
+			: (prevGlobalTop?.score ?? playerHighscore);
 
 		return c.json({
 			success: true,
@@ -1745,7 +1823,11 @@ communityGamesRoute.get("/:id/highscores/categories", requireAuth, async (c) => 
 			.where(eq(communityGameHighscores.gameId, gameId))
 			.orderBy(communityGameHighscores.category);
 
-		return c.json({ success: true, code: "SUCCESS", categories: categories.map((c) => c.category) });
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			categories: categories.map((c) => c.category)
+		});
 	} catch (error) {
 		console.error("Failed to fetch leaderboard categories:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
