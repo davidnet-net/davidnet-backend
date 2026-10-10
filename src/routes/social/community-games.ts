@@ -30,9 +30,32 @@ import {
 	uploadToBucket
 } from "../../core/shared/s3";
 import { collectAuth } from "../../middlewares/collectAuth";
+import { createRateLimiter } from "../../middlewares/rateLimiter";
 import { type Env, requireAuth } from "../../middlewares/requireAuth";
 
 export const communityGamesRoute = new Hono<Env>();
+
+// --- SDK ACTION RATE LIMIT ---
+// Everything reachable from window.DavidnetSDK inside a game's sandboxed iframe (highscores,
+// saves, achievements, UGC levels) shares ONE bucket per player+game, completely separate from the
+// global per-IP limiter in middlewares/index.ts. Without this, a buggy or malicious game calling an
+// SDK method on every animation frame would either burn through that player's site-wide request
+// budget (locking them out of everything else on davidnet.net, not just the game) or, if it slips
+// under that generous 10000/15min ceiling, still hammer the database hard enough to slow the site
+// down for everyone else. 60 requests per 10s (6/s sustained, bursts of 60) comfortably covers real
+// usage - occasional score/save/achievement submissions, polling a leaderboard every few seconds -
+// while quickly cutting off anything looping every frame.
+const SDK_ACTION_LIMIT = 60;
+const SDK_ACTION_WINDOW_MS = 10_000;
+function sdkRateLimitKey(
+	c: { get: (k: "user") => { id: string } },
+	gameId: string | undefined
+): string {
+	return `cg-sdk:${c.get("user").id}:${gameId}`;
+}
+const sdkActionLimiter = createRateLimiter(SDK_ACTION_LIMIT, SDK_ACTION_WINDOW_MS, {
+	keyFn: (c) => sdkRateLimitKey(c as never, c.req.param("id"))
+});
 
 // Max size (in characters of the JSON string) allowed for a single save blob. Raised from the
 // original 200kb to 1MB - old saves (all well under 200kb) are unaffected, this only loosens the
@@ -406,6 +429,11 @@ function injectGameSdk(gameId: string, htmlContent: string): string {
                             var GAME_ID = "${gameId}";
                             var pending = {};
 
+                            // Updated from the "rateLimit" field every SDK-backed call's response carries (see
+                            // getRateLimitStatus below) - lets a game check its remaining budget and back off
+                            // on its own BEFORE actually getting rate-limited, with no extra network round trip.
+                            var lastRateLimitStatus = null;
+
                             function uid() {
                                 return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
                             }
@@ -421,8 +449,21 @@ function injectGameSdk(gameId: string, htmlContent: string): string {
                                     pending[requestId] = function(message) {
                                         clearTimeout(timeoutId);
                                         if (message.success) {
+                                            if (message.data && message.data.rateLimit) {
+                                                lastRateLimitStatus = message.data.rateLimit;
+                                            }
                                             resolve(message.data);
                                         } else {
+                                            // The bridge's own fetch layer intercepts HTTP 429 before the real
+                                            // response body (with its precise resetAt) ever reaches here, so this
+                                            // is a best-effort "you're at zero" marker, not an exact reset time.
+                                            if (message.error === "RATELIMIT") {
+                                                lastRateLimitStatus = {
+                                                    limit: lastRateLimitStatus ? lastRateLimitStatus.limit : null,
+                                                    remaining: 0,
+                                                    resetAt: null
+                                                };
+                                            }
                                             reject(new Error(message.error || "DavidnetSDK: unknown error"));
                                         }
                                     };
@@ -491,6 +532,17 @@ function injectGameSdk(gameId: string, htmlContent: string): string {
                             var sessionReady = call("startSession", {});
 
                             window.DavidnetSDK = {
+                                // Every call above (except realtime.*, which has its own separate limit) shares
+                                // ONE rate-limit budget per player per game. This returns the most recently seen
+                                // status WITHOUT making a network call - null until the first call resolves.
+                                // Returns: { limit, remaining, resetAt } | null
+                                // "resetAt" is an epoch-ms timestamp for when the budget refills, or null if
+                                // not yet known (right after actually getting rate-limited, before any further
+                                // successful call). Check "remaining" and slow down once it gets low, instead of
+                                // waiting to get rejected.
+                                getRateLimitStatus: function() {
+                                    return lastRateLimitStatus;
+                                },
                                 // Submit a score. Server keeps the best score per-player and globally, PER
                                 // CATEGORY - pass { category: "time-attack" } to use a leaderboard other than
                                 // the default one (omit it entirely and you get the one-leaderboard-per-game
@@ -557,8 +609,9 @@ function injectGameSdk(gameId: string, htmlContent: string): string {
                                 // string you choose (unique within your game, not globally).
                                 //
                                 // Without progress/target: classic instant unlock - first call wins, repeat
-                                // calls are cheap no-ops, name/description/icon don't change after the first
-                                // call. Safe to call every time the unlock condition is true.
+                                // calls are cheap no-ops server-side, name/description/icon don't change after
+                                // the first call. Still, call this ONCE when the condition first becomes true,
+                                // not every frame it stays true - each call counts against the SDK rate limit.
                                 //
                                 // With progress + target (both positive integers): tracks a progress bar
                                 // instead of unlocking instantly - call this every time progress changes
@@ -1447,6 +1500,7 @@ communityGamesRoute.get("/:id", requireAuth, async (c) => {
 				isModerated: communityGame.isModerated,
 				isAiGenerated: communityGame.isAiGenerated,
 				createdAt: communityGame.createdAt,
+				updatedAt: communityGame.updatedAt,
 				creator: users.username,
 				creatorDisplayName: users.displayName,
 				creatorAvatarUrl: users.avatarUrl
@@ -1550,13 +1604,14 @@ communityGamesRoute.get("/:id/files", requireAuth, async (c) => {
 // --- 8B. START A SIGNED GAME SESSION (anti-cheat) ---
 // Called once by the injected game-SDK script when the iframe loads. The returned secret is kept
 // only inside that script's closure and is required to sign any later /:id/highscore submission.
-communityGamesRoute.post("/:id/session/start", requireAuth, async (c) => {
+communityGamesRoute.post("/:id/session/start", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 
 	try {
 		const [game] = await database
@@ -1580,7 +1635,8 @@ communityGamesRoute.post("/:id/session/start", requireAuth, async (c) => {
 			code: "SESSION_STARTED",
 			sessionId: session.id,
 			secret,
-			expiresAt: session.expiresAt
+			expiresAt: session.expiresAt,
+			rateLimit
 		});
 	} catch (error) {
 		console.error("Failed to start game session:", error);
@@ -1589,13 +1645,14 @@ communityGamesRoute.post("/:id/session/start", requireAuth, async (c) => {
 });
 
 // --- 9. APPLY HIGHSCORE ---
-communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
+communityGamesRoute.post("/:id/highscore", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	let body;
 	try {
 		body = await c.req.json();
@@ -1747,7 +1804,8 @@ communityGamesRoute.post("/:id/highscore", requireAuth, async (c) => {
 			playerHighscoreFlagged,
 			globalHighscore,
 			isNewPersonalBest,
-			isNewGlobalBest
+			isNewGlobalBest,
+			rateLimit
 		});
 	} catch (error) {
 		console.error("Failed to apply highscore:", error);
@@ -1786,13 +1844,14 @@ communityGamesRoute.get("/:id/highscores/categories", requireAuth, async (c) => 
 });
 
 // --- 10. GET HIGHSCORES (own + global leaderboard top 10, for one category) ---
-communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
+communityGamesRoute.get("/:id/highscores", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	const category = sanitizeCategory(c.req.query("category"));
 	if (category === null) {
 		return c.json({ success: false, code: "INVALID_CATEGORY" }, 400);
@@ -1866,7 +1925,8 @@ communityGamesRoute.get("/:id/highscores", requireAuth, async (c) => {
 			playerHighscore: own?.score ?? null,
 			playerHighscoreFlagged: own?.flagged ?? false,
 			globalHighscore: rankedLeaderboard[0] ?? null,
-			leaderboard: rankedLeaderboard
+			leaderboard: rankedLeaderboard,
+			rateLimit
 		});
 	} catch (error) {
 		console.error("Failed to fetch highscores:", error);
@@ -1950,13 +2010,14 @@ communityGamesRoute.get("/:id/playtime", requireAuth, async (c) => {
 });
 
 // --- 11. SAVE JSON BLOB (own save) ---
-communityGamesRoute.post("/:id/save", requireAuth, async (c) => {
+communityGamesRoute.post("/:id/save", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	let body;
 	try {
 		body = await c.req.json();
@@ -2024,7 +2085,7 @@ communityGamesRoute.post("/:id/save", requireAuth, async (c) => {
 				set: { data: body.data, updatedAt: now }
 			});
 
-		return c.json({ success: true, code: "SUCCESS", slot, savedAt: now });
+		return c.json({ success: true, code: "SUCCESS", slot, savedAt: now, rateLimit });
 	} catch (error) {
 		console.error("Failed to save json blob:", error);
 		return c.json({ success: false, code: "SAVE_FAILED" }, 500);
@@ -2032,13 +2093,14 @@ communityGamesRoute.post("/:id/save", requireAuth, async (c) => {
 });
 
 // --- 12. GET JSON BLOB (own save) ---
-communityGamesRoute.get("/:id/save", requireAuth, async (c) => {
+communityGamesRoute.get("/:id/save", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	const slot = sanitizeSlot(c.req.query("slot"));
 	if (slot === null) {
 		return c.json({ success: false, code: "INVALID_SLOT" }, 400);
@@ -2062,7 +2124,8 @@ communityGamesRoute.get("/:id/save", requireAuth, async (c) => {
 			code: "SUCCESS",
 			slot,
 			data: save?.data ?? null,
-			updatedAt: save?.updatedAt ?? null
+			updatedAt: save?.updatedAt ?? null,
+			rateLimit
 		});
 	} catch (error) {
 		console.error("Failed to fetch json blob:", error);
@@ -2090,13 +2153,14 @@ communityGamesRoute.delete("/:id/save", requireAuth, async (c) => {
 });
 
 // --- 13B. UNLOCK ACHIEVEMENT ---
-communityGamesRoute.post("/:id/achievement", requireAuth, async (c) => {
+communityGamesRoute.post("/:id/achievement", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	let body;
 	try {
 		body = await c.req.json();
@@ -2273,7 +2337,8 @@ communityGamesRoute.post("/:id/achievement", requireAuth, async (c) => {
 				progress: achievement.progress,
 				target: achievement.target,
 				unlockedAt: achievement.completedAt
-			}
+			},
+			rateLimit
 		});
 	} catch (error) {
 		console.error("Failed to unlock achievement:", error);
@@ -2282,13 +2347,14 @@ communityGamesRoute.post("/:id/achievement", requireAuth, async (c) => {
 });
 
 // --- 13C. GET MY ACHIEVEMENTS FOR ONE GAME ---
-communityGamesRoute.get("/:id/achievements", requireAuth, async (c) => {
+communityGamesRoute.get("/:id/achievements", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 
 	try {
 		// Includes in-progress (not yet completed) achievements too, so a game can rebuild a
@@ -2362,13 +2428,14 @@ communityGamesRoute.get("/:id/achievements", requireAuth, async (c) => {
 // --- 13D. UGC: PUBLISH (OR UPDATE) A LEVEL ---
 // Publishes a new level, or - if "id" names a level this caller already owns - overwrites it in
 // place. "data" is an opaque JSON blob; the platform never looks inside it.
-communityGamesRoute.post("/:id/levels", requireAuth, async (c) => {
+communityGamesRoute.post("/:id/levels", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	let body;
 	try {
 		body = await c.req.json();
@@ -2422,7 +2489,8 @@ communityGamesRoute.post("/:id/levels", requireAuth, async (c) => {
 			return c.json({
 				success: true,
 				code: "SUCCESS",
-				level: { id: existingId, title, updatedAt: now }
+				level: { id: existingId, title, updatedAt: now },
+				rateLimit
 			});
 		}
 
@@ -2448,7 +2516,8 @@ communityGamesRoute.post("/:id/levels", requireAuth, async (c) => {
 				title: level.title,
 				createdAt: level.createdAt,
 				updatedAt: level.updatedAt
-			}
+			},
+			rateLimit
 		});
 	} catch (error) {
 		console.error("Failed to publish level:", error);
@@ -2457,13 +2526,14 @@ communityGamesRoute.post("/:id/levels", requireAuth, async (c) => {
 });
 
 // --- 13E. UGC: LIST PUBLISHED LEVELS ---
-communityGamesRoute.get("/:id/levels", requireAuth, async (c) => {
+communityGamesRoute.get("/:id/levels", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	const mine = c.req.query("mine") === "true";
 
 	const limitRaw = Number(c.req.query("limit"));
@@ -2498,7 +2568,13 @@ communityGamesRoute.get("/:id/levels", requireAuth, async (c) => {
 
 		const hasMore = rows.length > limit;
 
-		return c.json({ success: true, code: "SUCCESS", levels: rows.slice(0, limit), hasMore });
+		return c.json({
+			success: true,
+			code: "SUCCESS",
+			levels: rows.slice(0, limit),
+			hasMore,
+			rateLimit
+		});
 	} catch (error) {
 		console.error("Failed to list levels:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
@@ -2506,13 +2582,14 @@ communityGamesRoute.get("/:id/levels", requireAuth, async (c) => {
 });
 
 // --- 13F. UGC: GET ONE LEVEL (including its data) ---
-communityGamesRoute.get("/:id/levels/:levelId", requireAuth, async (c) => {
+communityGamesRoute.get("/:id/levels/:levelId", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	const levelId = c.req.param("levelId");
 
 	try {
@@ -2533,7 +2610,7 @@ communityGamesRoute.get("/:id/levels/:levelId", requireAuth, async (c) => {
 
 		if (!level) return c.json({ success: false, code: "LEVEL_NOT_FOUND" }, 404);
 
-		return c.json({ success: true, code: "SUCCESS", level });
+		return c.json({ success: true, code: "SUCCESS", level, rateLimit });
 	} catch (error) {
 		console.error("Failed to fetch level:", error);
 		return c.json({ success: false, code: "FETCH_FAILED" }, 500);
@@ -2541,13 +2618,14 @@ communityGamesRoute.get("/:id/levels/:levelId", requireAuth, async (c) => {
 });
 
 // --- 13G. UGC: DELETE A LEVEL (author, or the game's creator/mods) ---
-communityGamesRoute.delete("/:id/levels/:levelId", requireAuth, async (c) => {
+communityGamesRoute.delete("/:id/levels/:levelId", requireAuth, sdkActionLimiter, async (c) => {
 	const user = c.get("user");
 	if (await checkIfBanned(user.id, c)) {
 		return c.json({ success: false, code: "BANNED" }, 403);
 	}
 
 	const gameId = c.req.param("id");
+	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	const levelId = c.req.param("levelId");
 
 	try {
@@ -2565,7 +2643,7 @@ communityGamesRoute.delete("/:id/levels/:levelId", requireAuth, async (c) => {
 
 		await database.delete(communityGameLevels).where(eq(communityGameLevels.id, levelId));
 
-		return c.json({ success: true, code: "SUCCESS", id: levelId });
+		return c.json({ success: true, code: "SUCCESS", id: levelId, rateLimit });
 	} catch (error) {
 		console.error("Failed to delete level:", error);
 		return c.json({ success: false, code: "DELETE_FAILED" }, 500);
@@ -2972,6 +3050,25 @@ communityGamesRoute.get("/:id/file/*", async (c) => {
 	const filePath = url.pathname.split(`/file/`)[1];
 
 	if (!id || !filePath) return c.json({ error: "Missing parameters" }, 400);
+
+	// Anti-sandbox-bypass: frame-ancestors (below) only stops a THIRD-PARTY site from framing this
+	// file - it does nothing to stop someone just sending the raw URL to a victim and having their
+	// browser navigate to it directly as a normal top-level page. Opened that way, none of the
+	// player page's <iframe sandbox="..."> restrictions apply (no opaque origin, popups/top-nav
+	// unrestricted, full permissions), so an attacker-uploaded game would run with full browser
+	// capabilities under a trusted davidnet.net subdomain - ideal for phishing. The Sec-Fetch-Dest
+	// request header (sent by all modern browsers, not spoofable by a page's own JS) says whether
+	// THIS request is for a nested browsing context ("iframe") or something else ("document" for a
+	// direct/typed navigation, "empty" for a fetch, etc.) - only documents loaded as an iframe may
+	// proceed. Fails open when the header is absent (very old browsers / non-browser clients) since
+	// that's a compatibility gap, not the phishing-via-real-browser threat this defends against.
+	const secFetchDest = c.req.header("Sec-Fetch-Dest");
+	if (filePath.endsWith(".html") && secFetchDest && secFetchDest !== "iframe") {
+		return c.json(
+			{ error: "This file can only be loaded inside the Davidnet game player." },
+			403
+		);
+	}
 
 	// Moderation takedowns must actually take the game down - the metadata endpoints (GET /:id,
 	// GET /feed) already hide moderated games, but this file route served the raw content
