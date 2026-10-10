@@ -131,9 +131,17 @@ const SESSION_DURATION_MS = 6 * 60 * 60 * 1000; // 6 hours
 const SESSION_TIMESTAMP_SKEW_MS = 2 * 60 * 1000; // 2 minutes
 // A submission claiming to come from a session that only just started can't reflect real play.
 const MIN_SESSION_AGE_MS = 1_500;
-// Cooldown between accepted submissions from the same session, to stop someone script-probing
-// many candidate scores in rapid succession to find one that slips under the anomaly threshold.
+// Cooldown between accepted submissions to the same RESOURCE (one highscore category, one save
+// slot, or one achievement id) from the same session - stops someone script-probing many
+// candidate scores in rapid succession to find one that slips under a leaderboard's anomaly
+// threshold. Deliberately scoped per resource, not per session: a game-over that submits a score,
+// saves progress, and unlocks an achievement all at once is normal, legitimate play, not probing -
+// there's nothing to gain from rate-limiting a save against an unrelated leaderboard's cooldown.
+// Kept in memory (not the DB) since it's a short-lived throttle, not something that needs to
+// survive a restart - a dropped cooldown on redeploy just means a slightly more generous window
+// once, not a security hole.
 const MIN_SUBMIT_INTERVAL_MS = 2_000;
+const lastSignedSubmissionByResource = new Map<string, number>();
 const HEX_PATTERN = /^[0-9a-f]+$/i;
 
 // --- PLAYTIME ---
@@ -312,8 +320,12 @@ async function verifyGameSession(params: {
 	payload: string;
 	timestamp: number;
 	signature: string;
+	// What "resource" this submission is for - e.g. `highscore:${category}`, `save:${slot}`, or
+	// `achievement:${achievementId}`. Scopes the submission cooldown (see MIN_SUBMIT_INTERVAL_MS)
+	// so unrelated submissions in the same session don't throttle each other.
+	cooldownKey: string;
 }): Promise<{ valid: true } | { valid: false; code: string }> {
-	const { sessionId, gameId, userId, payload, timestamp, signature } = params;
+	const { sessionId, gameId, userId, payload, timestamp, signature, cooldownKey } = params;
 
 	if (!HEX_PATTERN.test(signature) || signature.length % 2 !== 0) {
 		return { valid: false, code: "INVALID_SIGNATURE" };
@@ -348,11 +360,15 @@ async function verifyGameSession(params: {
 		return { valid: false, code: "SESSION_TOO_NEW" };
 	}
 
-	// Cooldown between accepted submissions, so a script can't rapid-fire candidate scores to probe
-	// where the anomaly threshold sits.
+	// Cooldown between accepted submissions to this SAME resource, so a script can't rapid-fire
+	// candidate scores to probe where one leaderboard's anomaly threshold sits. Scoped per resource
+	// (see cooldownKey's doc comment) rather than per session, so e.g. submitting a score, saving
+	// progress, and unlocking an achievement together on a game-over doesn't throttle itself.
+	const resourceCooldownKey = `${sessionId}:${cooldownKey}`;
+	const lastResourceSubmission = lastSignedSubmissionByResource.get(resourceCooldownKey) ?? 0;
 	if (
-		session.lastSignedTimestamp > 0 &&
-		timestamp - session.lastSignedTimestamp < MIN_SUBMIT_INTERVAL_MS
+		lastResourceSubmission > 0 &&
+		timestamp - lastResourceSubmission < MIN_SUBMIT_INTERVAL_MS
 	) {
 		return { valid: false, code: "RATE_LIMITED" };
 	}
@@ -371,10 +387,14 @@ async function verifyGameSession(params: {
 		return { valid: false, code: "INVALID_SIGNATURE" };
 	}
 
+	// lastSignedTimestamp (DB, whole-session) is purely for replay protection - timestamps must
+	// keep increasing across every signed call in the session, regardless of resource. The
+	// resource-scoped map above is the actual submission cooldown.
 	await database
 		.update(communityGameSessions)
 		.set({ lastSignedTimestamp: timestamp })
 		.where(eq(communityGameSessions.id, sessionId));
+	lastSignedSubmissionByResource.set(resourceCooldownKey, timestamp);
 
 	return { valid: true };
 }
@@ -1697,7 +1717,8 @@ communityGamesRoute.post("/:id/highscore", requireAuth, sdkActionLimiter, async 
 		userId: user.id,
 		payload: String(score),
 		timestamp,
-		signature
+		signature,
+		cooldownKey: `highscore:${category}`
 	});
 
 	if (!sessionCheck.valid) {
@@ -2060,7 +2081,8 @@ communityGamesRoute.post("/:id/save", requireAuth, sdkActionLimiter, async (c) =
 		userId: user.id,
 		payload: dataHash,
 		timestamp,
-		signature
+		signature,
+		cooldownKey: `save:${slot}`
 	});
 
 	if (!sessionCheck.valid) {
@@ -2238,7 +2260,8 @@ communityGamesRoute.post("/:id/achievement", requireAuth, sdkActionLimiter, asyn
 		userId: user.id,
 		payload: payloadHash,
 		timestamp,
-		signature
+		signature,
+		cooldownKey: `achievement:${achievementId}`
 	});
 
 	if (!sessionCheck.valid) {
