@@ -26,7 +26,7 @@ export const login = new Hono();
 
 login.post(
 	"/",
-	createRateLimiter(15, 15 * 60 * 1000),
+	createRateLimiter(15, 15 * 60 * 1000, { name: "login" }),
 	sValidator("json", loginSchema),
 	async (c) => {
 		const data = c.req.valid("json");
@@ -135,7 +135,7 @@ login.post(
 
 login.post(
 	"/verify-2fa",
-	createRateLimiter(15, 15 * 60 * 1000),
+	createRateLimiter(15, 15 * 60 * 1000, { name: "login-verify-2fa" }),
 	sValidator("json", verify2faSchema),
 	async (c) => {
 		const { mfaToken, code } = c.req.valid("json");
@@ -215,7 +215,7 @@ login.post(
 
 login.post(
 	"/verify-recovery-code",
-	createRateLimiter(15, 15 * 60 * 1000),
+	createRateLimiter(15, 15 * 60 * 1000, { name: "login-verify-recovery-code" }),
 	sValidator("json", verifyRecoveryCodeSchema),
 	async (c) => {
 		const { mfaToken, code } = c.req.valid("json");

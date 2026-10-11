@@ -58,7 +58,7 @@ async function isModerator(userId: string): Promise<boolean> {
 	return Boolean(access && access.internalAccess && access.supportAccess);
 }
 
-feedback.post("/", createRateLimiter(10, 15 * 60 * 1000), requireAuth, async (c) => {
+feedback.post("/", createRateLimiter(10, 15 * 60 * 1000, { name: "feedback-create" }), requireAuth, async (c) => {
 	const userID = c.get("user").id;
 
 	// multipart/form-data now (not plain JSON) so screenshots/recordings can ride along with the

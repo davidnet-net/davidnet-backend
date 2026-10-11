@@ -33,7 +33,7 @@ export const signup = new Hono();
 
 signup.post(
 	"/",
-	createRateLimiter(10, 15 * 60 * 1000),
+	createRateLimiter(10, 15 * 60 * 1000, { name: "signup-create" }),
 	sValidator("json", signupSchema),
 	async (c) => {
 		const data = c.req.valid("json");
@@ -213,7 +213,7 @@ signup.post(
 
 signup.patch(
 	"/change-email",
-	createRateLimiter(6, 15 * 60 * 1000),
+	createRateLimiter(6, 15 * 60 * 1000, { name: "signup-change-email" }),
 	sValidator("json", changeSignupEmailSchema),
 	async (c) => {
 		const signupToken = c.req.header("X-SignupToken");
@@ -274,7 +274,10 @@ signup.patch(
 	}
 );
 
-signup.post("/resend-email", createRateLimiter(10, 15 * 60 * 1000), async (c) => {
+signup.post(
+	"/resend-email",
+	createRateLimiter(10, 15 * 60 * 1000, { name: "signup-resend-email" }),
+	async (c) => {
 	const signupToken = c.req.header("X-SignupToken");
 
 	const userId = await isValidSignupToken(signupToken);
@@ -314,7 +317,7 @@ signup.post("/resend-email", createRateLimiter(10, 15 * 60 * 1000), async (c) =>
 signup.post(
 	"/verify-email",
 	sValidator("json", verifyEmailSchema),
-	createRateLimiter(15, 15 * 60 * 1000),
+	createRateLimiter(15, 15 * 60 * 1000, { name: "signup-verify-email" }),
 	async (c) => {
 		const data = c.req.valid("json");
 		const emailVerificationToken = data.emailVerificationToken;
@@ -401,7 +404,7 @@ signup.get("/email-verified", async (c) => {
 
 signup.post(
 	"/preferences",
-	createRateLimiter(5, 15 * 60 * 1000),
+	createRateLimiter(5, 15 * 60 * 1000, { name: "signup-preferences" }),
 	sValidator("json", initialPreferencesSchema),
 	async (c) => {
 		const signupToken = c.req.header("X-SignupToken");
@@ -451,7 +454,7 @@ signup.post(
 	}
 );
 
-signup.post("/finish", createRateLimiter(20, 15 * 60 * 1000), async (c) => {
+signup.post("/finish", createRateLimiter(20, 15 * 60 * 1000, { name: "signup-finish" }), async (c) => {
 	const signupToken = c.req.header("X-SignupToken");
 
 	const userId = await isValidSignupToken(signupToken);

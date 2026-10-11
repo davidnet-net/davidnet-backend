@@ -2,20 +2,21 @@ import { eq, and, gt } from "drizzle-orm";
 import { Hono } from "hono";
 
 import { database } from "../../core/database/client";
+import { boss } from "../../core/queue/boss";
+import { QUEUE } from "../../core/queue/jobs";
 import { users, passwordResetTokens, auditLogs } from "../../core/database/schema/schema";
 import { type Env } from "../../middlewares/requireAuth";
 import { createRateLimiter } from "../../middlewares/rateLimiter";
 import { sValidator } from "@hono/standard-validator";
-import { isInvalidEmail, sendEmail, loadEmailTemplate } from "../../core/utils/emails";
+import { isInvalidEmail } from "../../core/utils/emails";
 import { sendRecoveryEmailSchema, resetPasswordSchema } from "../../core/requestSchemas/recovery";
-import { passwordResetTemplate } from "../../emailTemplates/passwordReset";
 
 export const recovery = new Hono<Env>();
 
 // 1. Request Password Reset Email
 recovery.post(
 	"/send-recovery-email",
-	createRateLimiter(10, 15 * 60 * 1000), // 3 requests per 15 minutes
+	createRateLimiter(10, 15 * 60 * 1000, { name: "recovery-send-email" }), // 3 requests per 15 minutes
 	sValidator("json", sendRecoveryEmailSchema),
 	async (c) => {
 		const data = c.req.valid("json");
@@ -53,11 +54,7 @@ recovery.post(
 		const frontendUrl = "https://account.davidnet.net";
 		const resetPasswordUrl = `${frontendUrl}/recovery/password/link/${token}`;
 
-		const emailHtml = loadEmailTemplate(passwordResetTemplate, {
-			resetpassword_url: resetPasswordUrl
-		});
-
-		await sendEmail(user.email, "Reset your davidnet password", emailHtml);
+		await boss.send(QUEUE.PASSWORD_RESET_EMAIL, { email: user.email, resetPasswordUrl });
 
 		return c.json({ success: true, code: "MAYBE_SENDED" }, 200);
 	}
@@ -66,7 +63,7 @@ recovery.post(
 // 2. Confirm & Reset Password Using Token
 recovery.post(
 	"/reset-password",
-	createRateLimiter(5, 15 * 60 * 1000),
+	createRateLimiter(5, 15 * 60 * 1000, { name: "recovery-reset-password" }),
 	sValidator("json", resetPasswordSchema),
 	async (c) => {
 		const { token, newPassword } = c.req.valid("json");

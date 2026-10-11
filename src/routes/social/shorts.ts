@@ -1,11 +1,9 @@
 import { and, desc, eq, notInArray, or, sql } from "drizzle-orm";
 import { Hono } from "hono";
-import { getVideoDurationInSeconds } from "get-video-duration";
-import fs from "fs/promises";
-import path from "path";
-import os from "os";
 
 import { database } from "../../core/database/client";
+import { boss } from "../../core/queue/boss";
+import { QUEUE } from "../../core/queue/jobs";
 import {
 	accountModerationStatus,
 	internalAccess,
@@ -108,19 +106,10 @@ shortsRoute.post("/", requireAuth, async (c) => {
 	const fileName = `${shortId}.${fileExt}`;
 	const buffer = Buffer.from(await file.arrayBuffer());
 
-	let actualVideoLength = 15; // Safe fallback
-
-	// --- SECURE DURATION EXTRACTION (Temp File Method) ---
-	const tempFilePath = path.join(os.tmpdir(), fileName);
-	try {
-		await fs.writeFile(tempFilePath, buffer);
-		const duration = await getVideoDurationInSeconds(tempFilePath);
-		actualVideoLength = Math.max(1, Math.round(duration));
-	} catch (err) {
-		console.warn("Failed to extract video duration, using fallback:", err);
-	} finally {
-		await fs.unlink(tempFilePath).catch(() => {});
-	}
+	// Safe fallback - the real duration is probed asynchronously by the worker (see
+	// src/worker.ts's video.duration-probe handler) and patched in afterwards, so the response
+	// never blocks on writing a temp file and shelling out to a duration-probing subprocess.
+	const FALLBACK_VIDEO_LENGTH = 15;
 
 	try {
 		await uploadToBucket("shorts", fileName, buffer, file.type);
@@ -137,10 +126,12 @@ shortsRoute.post("/", requireAuth, async (c) => {
 				views: 0,
 				likesCount: 0,
 				watchDuration: 0,
-				videoLength: actualVideoLength,
+				videoLength: FALLBACK_VIDEO_LENGTH,
 				isModerated: false
 			})
 			.returning();
+
+		await boss.send(QUEUE.VIDEO_DURATION_PROBE, { shortId: newShort.id, bucket: "shorts", key: fileName });
 
 		void notifyActivity(
 			"📹 Short created",

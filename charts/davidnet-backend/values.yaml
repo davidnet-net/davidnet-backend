@@ -1,4 +1,6 @@
-replicaCount: 1
+# Bumped from 1 so the Redis-backed cross-pod coordination (WS presence/ownership, rate
+# limiting) is exercised continuously in steady state, not just transiently during a rollout.
+replicaCount: 2
 
 image:
   repository: ghcr.io/davidnet-net/davidnet-backend
@@ -10,3 +12,6 @@ service:
 
 ingress:
   publicHost: davidnet-backend.davidnet.net
+
+worker:
+  replicaCount: 1

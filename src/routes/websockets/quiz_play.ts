@@ -9,7 +9,30 @@ import {
 	sessionResponses
 } from "../../core/database/schema/quiz";
 import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
-import { broadcastToPresenters } from "./quiz_present";
+import { advanceActiveToResults } from "./quiz_present";
+import {
+	addConnectedParticipant,
+	blockNickname,
+	clearParticipantAlive,
+	countConnectedParticipants,
+	countResponses,
+	getResponses,
+	getState,
+	hasResponded,
+	isNicknameBlocked,
+	isParticipantAliveSomewhere,
+	markParticipantAlive,
+	onCmd,
+	onPlayerFrame,
+	onPlayerScatter,
+	onPlayerTargeted,
+	publishToPlayer,
+	publishToPresenters,
+	recordResponse,
+	registerInterestSource,
+	removeConnectedParticipant,
+	sendOwnerCommand
+} from "./quiz_realtime";
 
 type PlayerConnection = {
 	ws: any;
@@ -25,20 +48,50 @@ export const playWs = new Hono<{
 	};
 }>();
 
-const GLOBAL_STATE_KEY = "__quiz_play_state__";
+// Local-only: this pod's own player connections. Never read for cross-pod decisions - presence,
+// connected-participant counts, and phase state are mirrored into Redis (quiz_realtime.ts).
+const GLOBAL_STATE_KEY = "__quiz_play_local_state__";
 if (!(globalThis as any)[GLOBAL_STATE_KEY]) {
 	(globalThis as any)[GLOBAL_STATE_KEY] = {
 		wsByParticipant: new Map<string, PlayerConnection>(),
-		blockedNicknamesBySession: new Map<string, Set<string>>(),
-		disconnectGracePeriods: new Map<string, ReturnType<typeof setTimeout>>(),
-		activeQuestionsBySession: new Map<string, any>()
+		disconnectGracePeriods: new Map<string, ReturnType<typeof setTimeout>>()
 	};
 }
-const state = (globalThis as any)[GLOBAL_STATE_KEY];
+const localState = (globalThis as any)[GLOBAL_STATE_KEY];
 
-export const wsByParticipant = state.wsByParticipant;
-export const blockedNicknamesBySession = state.blockedNicknamesBySession;
-const disconnectGracePeriods = state.disconnectGracePeriods;
+export const wsByParticipant: Map<string, PlayerConnection> = localState.wsByParticipant;
+const disconnectGracePeriods: Map<
+	string,
+	ReturnType<typeof setTimeout>
+> = localState.disconnectGracePeriods;
+
+registerInterestSource(() => new Set(Array.from(wsByParticipant.values()).map((c) => c.sessionId)));
+
+onPlayerFrame((sessionId, frame) => {
+	const msgStr = JSON.stringify(frame);
+	wsByParticipant.forEach((conn) => {
+		if (conn.sessionId === sessionId && conn.ws.readyState === 1) conn.ws.send(msgStr);
+	});
+});
+
+onPlayerScatter((sessionId, payloads) => {
+	wsByParticipant.forEach((conn, participantId) => {
+		if (conn.sessionId !== sessionId || conn.ws.readyState !== 1) return;
+		const payload = payloads[participantId];
+		if (payload !== undefined) conn.ws.send(JSON.stringify(payload));
+	});
+});
+
+onPlayerTargeted((sessionId, participantId, frame, close) => {
+	const conn = wsByParticipant.get(participantId);
+	if (!conn || conn.sessionId !== sessionId || conn.ws.readyState !== 1) return;
+	conn.ws.send(JSON.stringify(frame));
+	if (close) {
+		try {
+			conn.ws.close(close.code, close.reason);
+		} catch {}
+	}
+});
 
 const HEARTBEAT_TICK_MS = 5000;
 const FAILING_MISSED_TICKS = 3;
@@ -62,8 +115,9 @@ if ((globalThis as any)[GLOBAL_INTERVAL_KEY]) {
 			if (conn.missedPongs >= DEAD_MISSED_TICKS) {
 				deadSockets.push(conn);
 			} else {
+				void markParticipantAlive(participantId);
 				if (conn.missedPongs >= FAILING_MISSED_TICKS) {
-					broadcastToPresenters(conn.sessionId, {
+					publishToPresenters(conn.sessionId, {
 						type: "PLAYER_HEALTH_UPDATE",
 						payload: { id: participantId, failingHeartbeat: true }
 					});
@@ -237,45 +291,31 @@ function evaluateAnswer(
 	}
 }
 
-export function broadcastToSessionPlayers(sessionId: string, message: any) {
-	const msgStr = JSON.stringify(message);
-	wsByParticipant.forEach((conn: PlayerConnection) => {
-		if (conn.sessionId === sessionId && conn.ws.readyState === 1) {
-			conn.ws.send(msgStr);
-		}
-	});
-}
-
 export async function terminateParticipant(participantId: string, sessionId: string) {
-	if (!wsByParticipant.has(participantId) && !disconnectGracePeriods.has(participantId)) return;
+	const hadGraceTimer = disconnectGracePeriods.has(participantId);
 	wsByParticipant.delete(participantId);
-	if (disconnectGracePeriods.has(participantId)) {
+	if (hadGraceTimer) {
 		clearTimeout(disconnectGracePeriods.get(participantId)!);
 		disconnectGracePeriods.delete(participantId);
 	}
+
+	await clearParticipantAlive(participantId);
+	await removeConnectedParticipant(sessionId, participantId);
 	await database
 		.delete(sessionParticipants)
 		.where(eq(sessionParticipants.id, participantId))
 		.catch(() => {});
-	broadcastToPresenters(sessionId, { type: "PLAYER_LEFT", payload: { id: participantId } });
+	publishToPresenters(sessionId, { type: "PLAYER_LEFT", payload: { id: participantId } });
 }
 
 export async function kickParticipant(playerId: string, sessionId: string, nickname: string) {
-	if (!blockedNicknamesBySession.has(sessionId))
-		blockedNicknamesBySession.set(sessionId, new Set());
-	blockedNicknamesBySession.get(sessionId)!.add(nickname.toLowerCase());
-	const conn = wsByParticipant.get(playerId);
-	if (conn && conn.ws && conn.ws.readyState === 1) {
-		conn.ws.send(
-			JSON.stringify({
-				type: "KICKED",
-				message: "You have been removed from the quiz by the host."
-			})
-		);
-		try {
-			conn.ws.close(4001, "Kicked");
-		} catch {}
-	}
+	await blockNickname(sessionId, nickname);
+	publishToPlayer(
+		sessionId,
+		playerId,
+		{ type: "KICKED", message: "You have been removed from the quiz by the host." },
+		{ code: 4001, reason: "Kicked" }
+	);
 	await terminateParticipant(playerId, sessionId);
 }
 
@@ -288,13 +328,12 @@ export async function terminateSessionPlayers(
 		.from(sessionParticipants)
 		.where(eq(sessionParticipants.sessionId, sessionId));
 	for (const p of participants) {
-		const conn = wsByParticipant.get(p.id);
-		if (conn && conn.ws && conn.ws.readyState === 1) {
-			conn.ws.send(JSON.stringify({ type: "SESSION_TERMINATED", message: reason }));
-			try {
-				conn.ws.close(4001, "Session Terminated");
-			} catch {}
-		}
+		publishToPlayer(
+			sessionId,
+			p.id,
+			{ type: "SESSION_TERMINATED", message: reason },
+			{ code: 4001, reason: "Session Terminated" }
+		);
 		await terminateParticipant(p.id, sessionId);
 	}
 	await database
@@ -306,7 +345,7 @@ export async function terminateSessionPlayers(
 function handleSocketDisconnection(participantId: string, sessionId: string, connectionId: string) {
 	const currentConn = wsByParticipant.get(participantId);
 	if (currentConn && currentConn.connectionId !== connectionId) return;
-	broadcastToPresenters(sessionId, {
+	publishToPresenters(sessionId, {
 		type: "PLAYER_HEALTH_UPDATE",
 		payload: { id: participantId, failingHeartbeat: true }
 	});
@@ -314,12 +353,93 @@ function handleSocketDisconnection(participantId: string, sessionId: string, con
 	const timeout = setTimeout(async () => {
 		disconnectGracePeriods.delete(participantId);
 		const activeConn = wsByParticipant.get(participantId);
-		if (!activeConn || activeConn.connectionId === connectionId) {
-			await terminateParticipant(participantId, sessionId);
-		}
+		if (activeConn && activeConn.connectionId !== connectionId) return; // reconnected on this pod
+		// Reconnect-on-a-different-pod fix: another pod's heartbeat may be refreshing this
+		// participant's alive marker right now, meaning they're not actually gone.
+		if (await isParticipantAliveSomewhere(participantId)) return;
+		await terminateParticipant(participantId, sessionId);
 	}, 15000);
 	disconnectGracePeriods.set(participantId, timeout);
 }
+
+// --- OWNER-ONLY ANSWER HANDLING ---
+// Mutates the owned phase-timer state (responses, auto-advance-on-everyone-answered), so this
+// always goes through the owner's command channel rather than running wherever the WS message
+// happened to land.
+async function handleSubmitAnswer(
+	sessionId: string,
+	payload: { participantId: string; data: any }
+) {
+	const { participantId, data } = payload;
+	const state = await getState(sessionId);
+	if (!state || state.phase !== "active") return;
+	if (await hasResponded(sessionId, state.questionIndex, participantId)) return; // Prevent double answering
+
+	const presenterPayload = state.presenterPayload as any;
+	const qType = presenterPayload.question.type;
+	const qId = presenterPayload.question.id;
+	const timeLimitMs = state.durationMs;
+	const multiplier = presenterPayload.question.pointsMultiplier || 1;
+	let responseTimeMs = Date.now() - state.serverTime;
+	if (responseTimeMs < 0) responseTimeMs = 0;
+
+	// Grace period allowed (1.5 seconds)
+	if (responseTimeMs > timeLimitMs + 1500) return;
+
+	const evaluation = evaluateAnswer(
+		qType,
+		data,
+		presenterPayload,
+		presenterPayload.correctOrder || null,
+		responseTimeMs,
+		timeLimitMs,
+		multiplier
+	);
+	if (!evaluation) return;
+	const { isCorrect, pointsEarned, breakdownKeys, selectedOptionId, textResponse } = evaluation;
+
+	await recordResponse(sessionId, state.questionIndex, participantId, {
+		isCorrect,
+		pointsEarned,
+		selectedOptionIds: breakdownKeys
+	});
+
+	// Fire and forget DB insertion
+	database
+		.insert(sessionResponses)
+		.values({
+			sessionId,
+			questionId: qId,
+			participantId: participantId,
+			selectedOptionId,
+			textResponse,
+			answerTimeMs: responseTimeMs,
+			pointsEarned: pointsEarned
+		})
+		.execute();
+
+	if (pointsEarned > 0) {
+		database
+			.update(sessionParticipants)
+			.set({ score: sql`${sessionParticipants.score} + ${pointsEarned}` })
+			.where(eq(sessionParticipants.id, participantId))
+			.execute();
+	}
+
+	publishToPlayer(sessionId, participantId, { type: "ANSWER_ACK" });
+
+	const [answeredCount, totalConnected] = await Promise.all([
+		countResponses(sessionId, state.questionIndex),
+		countConnectedParticipants(sessionId)
+	]);
+
+	if (totalConnected > 0 && answeredCount >= totalConnected) {
+		await advanceActiveToResults(sessionId);
+	} else {
+		publishToPresenters(sessionId, { type: "RESPONSES_UPDATE", count: answeredCount });
+	}
+}
+onCmd("answer", (sessionId, payload) => void handleSubmitAnswer(sessionId, payload as any));
 
 playWs.post("/leave/:participantId", async (c) => {
 	const participantId = c.req.param("participantId");
@@ -379,7 +499,7 @@ playWs.get(
 							const conn = wsByParticipant.get(participantId);
 							if (conn && conn.connectionId === connectionId) {
 								if (conn.missedPongs >= FAILING_MISSED_TICKS) {
-									broadcastToPresenters(sessionId, {
+									publishToPresenters(sessionId, {
 										type: "PLAYER_HEALTH_UPDATE",
 										payload: { id: participantId, failingHeartbeat: false }
 									});
@@ -406,8 +526,7 @@ playWs.get(
 							return;
 						}
 
-						const blockedSet = blockedNicknamesBySession.get(sessionId);
-						if (blockedSet && blockedSet.has(nickname.toLowerCase())) {
+						if (await isNicknameBlocked(sessionId, nickname)) {
 							ws.send(
 								JSON.stringify({
 									type: "KICKED",
@@ -435,12 +554,16 @@ playWs.get(
 									clearTimeout(disconnectGracePeriods.get(pId)!);
 									disconnectGracePeriods.delete(pId);
 								}
-								const oldConn = wsByParticipant.get(pId);
-								if (oldConn && oldConn.ws && oldConn.connectionId !== connectionId) {
-									try {
-										oldConn.ws.close(4000, "Superseded by new connection");
-									} catch {}
-								}
+								// Superseding close works whether the old connection is local (delivered via
+								// this pod's own onPlayerTargeted subscription) or on another pod entirely -
+								// one mechanism either way, published before the new connection overwrites
+								// wsByParticipant below.
+								publishToPlayer(
+									sessionId,
+									pId,
+									{ type: "ERROR", message: "Superseded by a new connection." },
+									{ code: 4000, reason: "Superseded by new connection" }
+								);
 							} else if (!disconnectGracePeriods.has(pId)) {
 								ws.send(
 									JSON.stringify({ type: "KICKED", message: "You were removed from the session." })
@@ -480,38 +603,48 @@ playWs.get(
 						}
 
 						participantId = participant.id;
-						wsByParticipant.set(participantId, {
+						// TS can't narrow a `let` captured across `await`s back to non-null, even though
+						// this closure is single-connection and never reassigns it concurrently - bind it
+						// to a const once so the rest of this block doesn't need a cast at every call site.
+						const resolvedParticipantId: string = participant.id;
+						wsByParticipant.set(resolvedParticipantId, {
 							ws,
 							sessionId,
-							participantId,
+							participantId: resolvedParticipantId,
 							missedPongs: 0,
 							connectionId
 						});
+						await markParticipantAlive(resolvedParticipantId);
+						await addConnectedParticipant(sessionId, resolvedParticipantId);
 
-						broadcastToPresenters(sessionId, {
+						publishToPresenters(sessionId, {
 							type: "PLAYER_HEALTH_UPDATE",
-							payload: { id: participantId, failingHeartbeat: false }
+							payload: { id: resolvedParticipantId, failingHeartbeat: false }
 						});
 						ws.send(
 							JSON.stringify({
 								type: "JOINED_SUCCESS",
-								payload: { id: participantId, nickname: participant.nickname }
+								payload: { id: resolvedParticipantId, nickname: participant.nickname }
 							})
 						);
-						broadcastToPresenters(sessionId, {
+						publishToPresenters(sessionId, {
 							type: "PLAYER_JOINED",
 							payload: {
-								id: participantId,
+								id: resolvedParticipantId,
 								nickname: participant.nickname,
 								failingHeartbeat: false
 							}
 						});
 
 						// RECONNECTION STATE SYNC
-						const activeSession = state.activeQuestionsBySession.get(sessionId);
+						const activeSession = await getState(sessionId);
 						if (activeSession) {
 							const phase = activeSession.phase;
-							const hasAnswered = activeSession.responses.has(participantId);
+							const hasAnswered = await hasResponded(
+								sessionId,
+								activeSession.questionIndex,
+								resolvedParticipantId
+							);
 							if (phase === "preview" || phase === "active") {
 								ws.send(
 									JSON.stringify({
@@ -525,14 +658,15 @@ playWs.get(
 									ws.send(JSON.stringify({ type: "ANSWER_ACK" }));
 								}
 							} else if (phase === "results") {
-								const pResponse = activeSession.responses.get(participantId);
+								const responses = await getResponses(sessionId, activeSession.questionIndex);
+								const pResponse = responses.get(resolvedParticipantId);
 								ws.send(
 									JSON.stringify({
 										type: "RESULTS",
 										payload: {
 											correct: pResponse?.isCorrect || false,
 											pointsEarned: pResponse?.pointsEarned || 0,
-											correctOptions: activeSession.presenterPayload.options
+											correctOptions: (activeSession.presenterPayload as any).options
 												.filter((o: any) => o.isCorrect)
 												.map((o: any) => o.id)
 										}
@@ -548,115 +682,9 @@ playWs.get(
 						}
 					}
 
-					// HANDLE ANSWER SUBMISSION
+					// HANDLE ANSWER SUBMISSION - always forwarded to whichever pod owns this session.
 					if (data.type === "SUBMIT_ANSWER" && participantId) {
-						const activeSession = state.activeQuestionsBySession.get(sessionId);
-						if (!activeSession || activeSession.phase !== "active") return;
-						if (activeSession.responses.has(participantId)) return; // Prevent double answering
-
-						const qType = activeSession.presenterPayload.question.type;
-						const qId = activeSession.presenterPayload.question.id;
-						const timeLimitMs = activeSession.durationMs;
-						const multiplier = activeSession.presenterPayload.question.pointsMultiplier || 1;
-						let responseTimeMs = Date.now() - activeSession.serverTime;
-						if (responseTimeMs < 0) responseTimeMs = 0;
-
-						// Grace period allowed (1.5 seconds)
-						if (responseTimeMs > timeLimitMs + 1500) return;
-
-						const evaluation = evaluateAnswer(
-							qType,
-							data,
-							activeSession.presenterPayload,
-							activeSession.presenterPayload.correctOrder || null,
-							responseTimeMs,
-							timeLimitMs,
-							multiplier
-						);
-						if (!evaluation) return;
-						const { isCorrect, pointsEarned, breakdownKeys, selectedOptionId, textResponse } =
-							evaluation;
-
-						activeSession.responses.set(participantId, {
-							isCorrect,
-							pointsEarned,
-							selectedOptionIds: breakdownKeys
-						});
-
-						// Fire and forget DB insertion
-						database
-							.insert(sessionResponses)
-							.values({
-								sessionId,
-								questionId: qId,
-								participantId: participantId,
-								selectedOptionId,
-								textResponse,
-								answerTimeMs: responseTimeMs,
-								pointsEarned: pointsEarned
-							})
-							.execute();
-
-						if (pointsEarned > 0) {
-							database
-								.update(sessionParticipants)
-								.set({ score: sql`${sessionParticipants.score} + ${pointsEarned}` })
-								.where(eq(sessionParticipants.id, participantId))
-								.execute();
-						}
-
-						// Acknowledge submission to player
-						ws.send(JSON.stringify({ type: "ANSWER_ACK" }));
-
-						// Check Auto-skip if all players answered
-						const playersInSession = Array.from(wsByParticipant.values()).filter(
-							(p: any) => p.sessionId === sessionId
-						);
-						if (
-							activeSession.responses.size >= playersInSession.length &&
-							playersInSession.length > 0
-						) {
-							activeSession.phase = "results";
-							const breakdown: Record<string, number> = {};
-							activeSession.responses.forEach((res: any) => {
-								res.selectedOptionIds.forEach((id: string) => {
-									breakdown[id] = (breakdown[id] || 0) + 1;
-								});
-							});
-							activeSession.resultsBreakdown = breakdown;
-
-							broadcastToPresenters(sessionId, {
-								type: "RESULTS",
-								breakdown,
-								payload: activeSession.presenterPayload
-							});
-
-							const correctOptionIds = activeSession.presenterPayload.options
-								.filter((o: any) => o.isCorrect)
-								.map((o: any) => o.id);
-
-							wsByParticipant.forEach((conn: PlayerConnection, pId: string) => {
-								if (conn.sessionId === sessionId && conn.ws.readyState === 1) {
-									const pResponse = activeSession.responses.get(pId);
-									conn.ws.send(
-										JSON.stringify({
-											type: "RESULTS",
-											payload: {
-												correct: pResponse?.isCorrect || false,
-												pointsEarned: pResponse?.pointsEarned || 0,
-												correctOptions: correctOptionIds
-											}
-										})
-									);
-								}
-							});
-						} else {
-							// Update presenter response count
-							broadcastToPresenters(sessionId, {
-								type: "RESPONSES_UPDATE",
-								count: activeSession.responses.size
-							});
-						}
+						sendOwnerCommand(sessionId, "answer", { participantId, data });
 					}
 				} catch (err) {
 					console.error("[Quiz Player WS] Error handling message:", err);
@@ -678,3 +706,18 @@ playWs.get(
 		};
 	})
 );
+
+// Called from src/index.ts's graceful shutdown sequence (via routes/websockets/drain.ts). This
+// pod never owns the phase-timer by virtue of having player connections alone (ownership is
+// claimed by whichever pod has the presenter, or by the watchdog as a fallback) - draining here is
+// just closing local sockets with a reconnect hint.
+export async function releaseAndDrain() {
+	for (const conn of Array.from(wsByParticipant.values())) {
+		try {
+			conn.ws.send(JSON.stringify({ type: "RECONNECT", code: 4100, message: "Server restarting" }));
+		} catch {}
+		try {
+			conn.ws.close(4100, "Server restarting");
+		} catch {}
+	}
+}

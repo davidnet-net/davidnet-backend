@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: davidnet-backend-worker
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: davidnet-backend-worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      app: davidnet-backend-worker
+  template:
+    metadata:
+      labels:
+        app: davidnet-backend-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        # Deliberately a separate pod from the API, not a pg-boss worker registered in-process
+        # there - job handlers here (SMTP sends, video-duration probing) run CPU/IO-bound work
+        # that would otherwise share Bun's single-threaded event loop with request handling.
+        # No HTTP port, no probes (relies on the Deployment's default crash-restart), and a
+        # strict subset of the API's env - no JWT/OIDC/Redis secrets, since job handlers never
+        # touch auth or WS state.
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["bun", "run", "dist/worker.js"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: DATABASE_URL
+            - name: EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: EMAIL
+            - name: EMAIL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: EMAIL_PASSWORD
+            - name: GARAGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: GARAGE_ACCESS_KEY
+            - name: GARAGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: GARAGE_SECRET_KEY

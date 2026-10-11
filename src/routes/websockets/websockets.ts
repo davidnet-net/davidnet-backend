@@ -1,8 +1,9 @@
 import { Hono } from "hono";
-import { editWs } from "./quiz_edit";
-import { presentWs } from "./quiz_present";
-import { playWs } from "./quiz_play";
+
 import { communityRealtimeWs } from "./community_realtime";
+import { editWs } from "./quiz_edit";
+import { playWs } from "./quiz_play";
+import { presentWs } from "./quiz_present";
 
 export const websockets = new Hono();
 

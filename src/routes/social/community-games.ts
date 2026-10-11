@@ -54,6 +54,7 @@ function sdkRateLimitKey(
 	return `cg-sdk:${c.get("user").id}:${gameId}`;
 }
 const sdkActionLimiter = createRateLimiter(SDK_ACTION_LIMIT, SDK_ACTION_WINDOW_MS, {
+	name: "community-games-sdk-action",
 	keyFn: (c) => sdkRateLimitKey(c as never, c.req.param("id"))
 });
 
@@ -1685,7 +1686,7 @@ communityGamesRoute.post("/:id/session/start", requireAuth, sdkActionLimiter, as
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 
 	try {
 		const [game] = await database
@@ -1726,7 +1727,7 @@ communityGamesRoute.post("/:id/highscore", requireAuth, sdkActionLimiter, async 
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	let body;
 	try {
 		body = await c.req.json();
@@ -1926,7 +1927,7 @@ communityGamesRoute.get("/:id/highscores", requireAuth, sdkActionLimiter, async 
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	const category = sanitizeCategory(c.req.query("category"));
 	if (category === null) {
 		return c.json({ success: false, code: "INVALID_CATEGORY" }, 400);
@@ -2092,7 +2093,7 @@ communityGamesRoute.post("/:id/save", requireAuth, sdkActionLimiter, async (c) =
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	let body;
 	try {
 		body = await c.req.json();
@@ -2176,7 +2177,7 @@ communityGamesRoute.get("/:id/save", requireAuth, sdkActionLimiter, async (c) =>
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	const slot = sanitizeSlot(c.req.query("slot"));
 	if (slot === null) {
 		return c.json({ success: false, code: "INVALID_SLOT" }, 400);
@@ -2236,7 +2237,7 @@ communityGamesRoute.post("/:id/achievement", requireAuth, sdkActionLimiter, asyn
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	let body;
 	try {
 		body = await c.req.json();
@@ -2431,7 +2432,7 @@ communityGamesRoute.get("/:id/achievements", requireAuth, sdkActionLimiter, asyn
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 
 	try {
 		// Includes in-progress (not yet completed) achievements too, so a game can rebuild a
@@ -2512,7 +2513,7 @@ communityGamesRoute.post("/:id/levels", requireAuth, sdkActionLimiter, async (c)
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	let body;
 	try {
 		body = await c.req.json();
@@ -2610,7 +2611,7 @@ communityGamesRoute.get("/:id/levels", requireAuth, sdkActionLimiter, async (c) 
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	const mine = c.req.query("mine") === "true";
 
 	const limitRaw = Number(c.req.query("limit"));
@@ -2666,7 +2667,7 @@ communityGamesRoute.get("/:id/levels/:levelId", requireAuth, sdkActionLimiter, a
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	const levelId = c.req.param("levelId");
 
 	try {
@@ -2702,7 +2703,7 @@ communityGamesRoute.delete("/:id/levels/:levelId", requireAuth, sdkActionLimiter
 	}
 
 	const gameId = c.req.param("id");
-	const rateLimit = sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
+	const rateLimit = await sdkActionLimiter.getStatus(sdkRateLimitKey(c, gameId));
 	const levelId = c.req.param("levelId");
 
 	try {

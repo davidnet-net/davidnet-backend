@@ -13,6 +13,16 @@ services:
       - ./volumes/pgdata:/var/lib/postgresql
     restart: unless-stopped
 
+  # Cross-pod coordination backplane (WS presence/ownership, rate limiting) for local dev. The
+  # backend talks to it via REDIS_URL (see .env.example), mirroring the GARAGE_ENDPOINT pattern.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - ./volumes/redis:/data
+    restart: unless-stopped
+
   adminer:
     image: msav/adminer-autologin:latest
     ports:

@@ -16,12 +16,30 @@ import {
 } from "../../core/database/schema/quiz";
 import { hasPermission } from "../../core/shared/checkPermissions";
 import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
+import { kickParticipant, terminateSessionPlayers, wsByParticipant } from "./quiz_play";
 import {
-	broadcastToSessionPlayers,
-	kickParticipant,
-	terminateSessionPlayers,
-	wsByParticipant
-} from "./quiz_play";
+	armPhaseTimer,
+	claimOwnership,
+	clearPhaseTimer,
+	deleteConnectedParticipants,
+	deleteState,
+	getResponses,
+	getState,
+	isPresenterAliveSomewhere,
+	isStillOwner,
+	listConnectedParticipants,
+	markPresenterAlive,
+	onCmd,
+	onPresenterFrame,
+	publishScatterToPlayers,
+	publishToPlayers,
+	publishToPresenters,
+	QuizRealtimeState,
+	registerInterestSource,
+	releaseOwnership,
+	sendOwnerCommand,
+	setState
+} from "./quiz_realtime";
 
 type PresenterConnection = {
 	ws: any;
@@ -30,8 +48,21 @@ type PresenterConnection = {
 	connectionId: string;
 };
 
+// Local-only: this pod's own presenter connections. Never read for cross-pod decisions - presence
+// and phase-timer state are mirrored into Redis (quiz_realtime.ts) for that.
 export const activePresenters = new Map<string, Set<PresenterConnection>>();
 const hostDisconnectGracePeriods = new Map<string, ReturnType<typeof setTimeout>>();
+
+registerInterestSource(() => activePresenters.keys());
+
+onPresenterFrame((sessionId, frame) => {
+	const presenters = activePresenters.get(sessionId);
+	if (!presenters) return;
+	const msgStr = JSON.stringify(frame);
+	for (const conn of presenters) {
+		if (conn.ws.readyState === 1) conn.ws.send(msgStr);
+	}
+});
 
 const HOST_HEARTBEAT_TICK_MS = 5000;
 const HOST_DEAD_MISSED_TICKS = 12;
@@ -61,28 +92,23 @@ if ((globalThis as any)[GLOBAL_HOST_INTERVAL_KEY])
 			} catch {}
 			presenters.delete(conn);
 		}
-		if (presenters.size === 0 && !hostDisconnectGracePeriods.has(sessionId)) {
-			const timeout = setTimeout(() => {
+		if (presenters.size > 0) {
+			void markPresenterAlive(sessionId);
+		} else if (!hostDisconnectGracePeriods.has(sessionId)) {
+			const timeout = setTimeout(async () => {
 				hostDisconnectGracePeriods.delete(sessionId);
 				const currentHosts = activePresenters.get(sessionId);
-				if (!currentHosts || currentHosts.size === 0) {
-					terminateSessionPlayers(sessionId, "The host disconnected. Presentation ended.");
-					activePresenters.delete(sessionId);
-				}
+				if (currentHosts && currentHosts.size > 0) return;
+				// Reconnect-on-a-different-pod fix: another pod's local presenter set might be the
+				// reason THIS pod's set is empty, not an actual host disconnect.
+				if (await isPresenterAliveSomewhere(sessionId)) return;
+				await terminateSessionPlayers(sessionId, "The host disconnected. Presentation ended.");
+				activePresenters.delete(sessionId);
 			}, 15000);
 			hostDisconnectGracePeriods.set(sessionId, timeout);
 		}
 	});
 }, HOST_HEARTBEAT_TICK_MS);
-
-export function broadcastToPresenters(sessionId: string, message: any) {
-	const presenters = activePresenters.get(sessionId);
-	if (!presenters) return;
-	const msgStr = JSON.stringify(message);
-	for (const conn of presenters) {
-		if (conn.ws.readyState === 1) conn.ws.send(msgStr);
-	}
-}
 
 export const presentWs = new Hono<{ Variables: { session: QuizSession; quizName: string } }>();
 
@@ -180,6 +206,264 @@ function isQuestionInvalid(q: any, options: any[]): boolean {
 			return true;
 	}
 }
+
+// --- RESUMABLE PHASE PROGRESSION ---
+// These three functions are the single source of truth for every phase transition, whether
+// triggered by the auto-advance timer, a host NEXT_PHASE command, or a SUBMIT_ANSWER that
+// completes the last outstanding response (quiz_play.ts's handleSubmitAnswer calls
+// advanceActiveToResults directly for that last case). Each re-checks isStillOwner before doing
+// anything observable, so a pod that lost its lease mid-flight (GC pause, Redis blip) aborts
+// instead of racing whichever pod has since taken over.
+
+async function handlePhaseAdvance(sessionId: string, fromPhase: "preview" | "active") {
+	if (fromPhase === "preview") await advancePreviewToActive(sessionId);
+	else await advanceActiveToResults(sessionId);
+}
+
+async function advancePreviewToActive(sessionId: string) {
+	const state = await getState(sessionId);
+	if (!state || state.phase !== "preview") return;
+	if (!(await isStillOwner(sessionId))) return;
+
+	const activeServerTime = Date.now();
+	const activeDurationMs = state.nextDurationMs;
+	const newState: QuizRealtimeState = {
+		...state,
+		phase: "active",
+		serverTime: activeServerTime,
+		durationMs: activeDurationMs,
+		deadlineAt: activeServerTime + activeDurationMs
+	};
+	await setState(sessionId, newState);
+
+	publishToPresenters(sessionId, {
+		type: "QUESTION_ACTIVE",
+		serverTime: activeServerTime,
+		durationMs: activeDurationMs,
+		payload: state.presenterPayload
+	});
+	publishToPlayers(sessionId, {
+		type: "QUESTION_ACTIVE",
+		serverTime: activeServerTime,
+		durationMs: activeDurationMs,
+		payload: state.playerPayload
+	});
+
+	await armPhaseTimer(sessionId, handlePhaseAdvance);
+}
+
+// Exported: quiz_play.ts's handleSubmitAnswer calls this directly when the last outstanding
+// response comes in, so "everyone answered" advances immediately instead of waiting for the
+// question's full time limit to elapse - same behavior the original single-process code had.
+export async function advanceActiveToResults(sessionId: string) {
+	const state = await getState(sessionId);
+	if (!state || state.phase !== "active") return;
+	if (!(await isStillOwner(sessionId))) return;
+
+	clearPhaseTimer(sessionId); // results/leaderboard only advance via an explicit host NEXT_PHASE
+
+	const responses = await getResponses(sessionId, state.questionIndex);
+	const breakdown: Record<string, number> = {};
+	for (const res of responses.values()) {
+		for (const id of res.selectedOptionIds) breakdown[id] = (breakdown[id] || 0) + 1;
+	}
+
+	const newState: QuizRealtimeState = { ...state, phase: "results", resultsBreakdown: breakdown };
+	await setState(sessionId, newState);
+
+	publishToPresenters(sessionId, { type: "RESULTS", breakdown, payload: state.presenterPayload });
+
+	const correctOptionIds = ((state.presenterPayload as any)?.options || [])
+		.filter((o: any) => o.isCorrect)
+		.map((o: any) => o.id);
+	const connectedIds = await listConnectedParticipants(sessionId);
+	const scatterPayloads: Record<string, unknown> = {};
+	for (const participantId of connectedIds) {
+		const res = responses.get(participantId);
+		scatterPayloads[participantId] = {
+			type: "RESULTS",
+			payload: {
+				correct: res?.isCorrect || false,
+				pointsEarned: res?.pointsEarned || 0,
+				correctOptions: correctOptionIds
+			}
+		};
+	}
+	publishScatterToPlayers(sessionId, scatterPayloads);
+}
+
+async function triggerQuestionPhase(quizId: string, sessionId: string, questionIndex: number) {
+	const quizQuestions = await database
+		.select()
+		.from(questions)
+		.where(eq(questions.quizId, quizId))
+		.orderBy(questions.position);
+	const targetQ = quizQuestions[questionIndex];
+	if (!targetQ) return;
+
+	const qOptions = await database
+		.select()
+		.from(quizOptions)
+		.where(eq(quizOptions.questionId, targetQ.id))
+		.orderBy(quizOptions.position);
+	const slotColors = qOptions.map((o) => o.color);
+
+	// Server-only: the correct sequence for puzzle questions. Never sent to clients.
+	const correctOrder = targetQ.type === "puzzle" ? qOptions.map((o) => o.id) : null;
+
+	const shuffledOptions = [...qOptions];
+	for (let i = shuffledOptions.length - 1; i > 0; i--) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[shuffledOptions[i], shuffledOptions[j]] = [shuffledOptions[j], shuffledOptions[i]];
+	}
+	shuffledOptions.forEach((opt, idx) => {
+		opt.color = slotColors[idx] ?? opt.color;
+	});
+
+	const presenterPayload = { question: targetQ, options: shuffledOptions, correctOrder };
+
+	// type_answer options ARE the accepted answers, so they must never reach the player.
+	// Puzzle options drop their original `position` (the correct-order answer) and are
+	// identified by shuffled array index on the client instead.
+	const playerOptions =
+		targetQ.type === "type_answer"
+			? []
+			: shuffledOptions.map((o) => ({ id: o.id, text: o.text, color: o.color }));
+
+	let publicSettings: Record<string, number | string> | undefined;
+	const qSettings = targetQ.settings as Record<string, number | string> | null;
+	if (qSettings && targetQ.type === "slider") {
+		publicSettings = { min: qSettings.min, max: qSettings.max, step: qSettings.step };
+	} else if (qSettings && targetQ.type === "scale") {
+		publicSettings = {
+			min: qSettings.min,
+			max: qSettings.max,
+			minLabel: qSettings.minLabel,
+			maxLabel: qSettings.maxLabel
+		};
+	}
+
+	const playerPayload = {
+		question: {
+			id: targetQ.id,
+			text: targetQ.text,
+			type: targetQ.type,
+			timeLimit: targetQ.timeLimit,
+			isMultiSelect: targetQ.isMultiSelect,
+			pointsMultiplier: targetQ.pointsMultiplier,
+			settings: publicSettings
+		},
+		options: playerOptions
+	};
+
+	const previewDurationMs = 5000;
+	const previewServerTime = Date.now();
+	const activeDurationMs = targetQ.timeLimit * 1000;
+
+	const state: QuizRealtimeState = {
+		phase: "preview",
+		questionIndex,
+		quizId,
+		serverTime: previewServerTime,
+		durationMs: previewDurationMs,
+		deadlineAt: previewServerTime + previewDurationMs,
+		nextDurationMs: activeDurationMs,
+		presenterPayload,
+		playerPayload,
+		resultsBreakdown: {},
+		leaderboard: []
+	};
+	await setState(sessionId, state);
+
+	publishToPresenters(sessionId, {
+		type: "QUESTION_PREVIEW",
+		serverTime: previewServerTime,
+		durationMs: previewDurationMs,
+		payload: presenterPayload
+	});
+	publishToPlayers(sessionId, {
+		type: "QUESTION_PREVIEW",
+		serverTime: previewServerTime,
+		durationMs: previewDurationMs,
+		payload: playerPayload
+	});
+
+	await armPhaseTimer(sessionId, handlePhaseAdvance);
+}
+
+// --- OWNER-ONLY HOST COMMANDS ---
+// Only START_SESSION/NEXT_PHASE/STOP_SESSION touch the owned phase-timer state, so only these go
+// through sendOwnerCommand. LOCK_SESSION/UNLOCK_SESSION/REMOVE_PLAYER don't need ownership at all
+// and are handled directly in onMessage below, by whichever pod received them.
+async function handleHostCommand(sessionId: string, payload: { type: string; quizId: string }) {
+	if (payload.type === "START_SESSION") {
+		await database
+			.update(quizSessions)
+			.set({ status: "question_active", currentQuestionIndex: 0 })
+			.where(eq(quizSessions.id, sessionId));
+		await triggerQuestionPhase(payload.quizId, sessionId, 0);
+		return;
+	}
+
+	if (payload.type === "NEXT_PHASE") {
+		const state = await getState(sessionId);
+		if (!state) return;
+
+		if (state.phase === "active") {
+			await advanceActiveToResults(sessionId);
+		} else if (state.phase === "results") {
+			const quizQuestions = await database
+				.select()
+				.from(questions)
+				.where(eq(questions.quizId, payload.quizId))
+				.orderBy(questions.position);
+
+			if (state.questionIndex + 1 >= quizQuestions.length) {
+				const allPlayers = await database
+					.select({
+						id: sessionParticipants.id,
+						nickname: sessionParticipants.nickname,
+						score: sessionParticipants.score
+					})
+					.from(sessionParticipants)
+					.where(eq(sessionParticipants.sessionId, sessionId))
+					.orderBy(desc(sessionParticipants.score));
+
+				await setState(sessionId, { ...state, phase: "finished", leaderboard: allPlayers });
+				publishToPresenters(sessionId, { type: "FINISHED", payload: allPlayers });
+				publishToPlayers(sessionId, { type: "FINISHED", payload: allPlayers });
+			} else {
+				const topPlayers = await database
+					.select({
+						id: sessionParticipants.id,
+						nickname: sessionParticipants.nickname,
+						score: sessionParticipants.score
+					})
+					.from(sessionParticipants)
+					.where(eq(sessionParticipants.sessionId, sessionId))
+					.orderBy(desc(sessionParticipants.score))
+					.limit(5);
+
+				await setState(sessionId, { ...state, phase: "leaderboard", leaderboard: topPlayers });
+				publishToPresenters(sessionId, { type: "LEADERBOARD", payload: topPlayers });
+				publishToPlayers(sessionId, { type: "LEADERBOARD", payload: topPlayers });
+			}
+		} else if (state.phase === "leaderboard") {
+			await triggerQuestionPhase(payload.quizId, sessionId, state.questionIndex + 1);
+		}
+		return;
+	}
+
+	if (payload.type === "STOP_SESSION") {
+		await terminateSessionPlayers(sessionId, "The host stopped the presentation.");
+		await database.delete(quizSessions).where(eq(quizSessions.id, sessionId));
+		await deleteState(sessionId);
+		await deleteConnectedParticipants(sessionId);
+		activePresenters.delete(sessionId);
+		await releaseOwnership(sessionId);
+	}
+}
+onCmd("host", (sessionId, payload) => void handleHostCommand(sessionId, payload as any));
 
 presentWs.get(
 	"/:quizId",
@@ -298,10 +582,16 @@ presentWs.get(
 				if (!activePresenters.has(sessionId)) activePresenters.set(sessionId, new Set());
 				const presenterConn: PresenterConnection = { ws, sessionId, missedPongs: 0, connectionId };
 				activePresenters.get(sessionId)!.add(presenterConn);
+				await markPresenterAlive(sessionId);
 				if (hostDisconnectGracePeriods.has(sessionId)) {
 					clearTimeout(hostDisconnectGracePeriods.get(sessionId)!);
 					hostDisconnectGracePeriods.delete(sessionId);
 				}
+
+				// Whichever pod the host's connection lands on becomes the session's phase-timer
+				// owner by default - the watchdog in quiz_realtime.ts is purely the fallback path for
+				// taking over after that pod dies, not the normal way ownership is acquired.
+				await claimOwnership(sessionId);
 
 				const currentParticipants = await database
 					.select()
@@ -328,8 +618,7 @@ presentWs.get(
 					})
 				);
 
-				const globalState = (globalThis as any)["__quiz_play_state__"];
-				const activeSession = globalState?.activeQuestionsBySession?.get(sessionId);
+				const activeSession = await getState(sessionId);
 				if (activeSession) {
 					const timePassed = Date.now() - activeSession.serverTime;
 					const remaining = Math.max(0, activeSession.durationMs - timePassed);
@@ -341,7 +630,6 @@ presentWs.get(
 							payload: activeSession.presenterPayload,
 							resultsBreakdown: activeSession.resultsBreakdown,
 							leaderboard: activeSession.leaderboard,
-							responseCount: activeSession.responses?.size || 0,
 							durationMs: remaining
 						})
 					);
@@ -367,8 +655,7 @@ presentWs.get(
 					}
 
 					if (data.type === "REQUEST_SYNC") {
-						const globalState = (globalThis as any)["__quiz_play_state__"];
-						const activeSession = globalState?.activeQuestionsBySession?.get(sessionId);
+						const activeSession = await getState(sessionId);
 						if (activeSession) {
 							const timePassed = Date.now() - activeSession.serverTime;
 							const remaining = Math.max(0, activeSession.durationMs - timePassed);
@@ -380,7 +667,6 @@ presentWs.get(
 									payload: activeSession.presenterPayload,
 									resultsBreakdown: activeSession.resultsBreakdown,
 									leaderboard: activeSession.leaderboard,
-									responseCount: activeSession.responses?.size || 0,
 									durationMs: remaining
 								})
 							);
@@ -388,107 +674,12 @@ presentWs.get(
 						return;
 					}
 
-					if (data.type === "START_SESSION") {
-						await database
-							.update(quizSessions)
-							.set({ status: "question_active", currentQuestionIndex: 0 })
-							.where(eq(quizSessions.id, sessionId));
-						await triggerQuestionPhase(session.quizId, sessionId, 0);
-						return;
-					}
-
-					if (data.type === "NEXT_PHASE") {
-						const globalState = (globalThis as any)["__quiz_play_state__"];
-						const activeSession = globalState?.activeQuestionsBySession?.get(sessionId);
-						if (!activeSession) return;
-
-						if (activeSession.phase === "active") {
-							activeSession.phase = "results";
-							const breakdown: Record<string, number> = {};
-							activeSession.responses.forEach((res: any) => {
-								res.selectedOptionIds.forEach((id: string) => {
-									breakdown[id] = (breakdown[id] || 0) + 1;
-								});
-							});
-							activeSession.resultsBreakdown = breakdown;
-
-							broadcastToPresenters(sessionId, {
-								type: "RESULTS",
-								breakdown,
-								payload: activeSession.presenterPayload
-							});
-
-							const correctOptionIds = activeSession.presenterPayload.options
-								.filter((o: any) => o.isCorrect)
-								.map((o: any) => o.id);
-
-							wsByParticipant.forEach((conn: any, pId: string) => {
-								if (conn.sessionId === sessionId && conn.ws.readyState === 1) {
-									const pResponse = activeSession.responses.get(pId);
-									conn.ws.send(
-										JSON.stringify({
-											type: "RESULTS",
-											payload: {
-												correct: pResponse?.isCorrect || false,
-												pointsEarned: pResponse?.pointsEarned || 0,
-												correctOptions: correctOptionIds
-											}
-										})
-									);
-								}
-							});
-						} else if (activeSession.phase === "results") {
-							const quizQuestions = await database
-								.select()
-								.from(questions)
-								.where(eq(questions.quizId, session.quizId))
-								.orderBy(questions.position);
-
-							if (activeSession.questionIndex + 1 >= quizQuestions.length) {
-								activeSession.phase = "finished";
-								const allPlayers = await database
-									.select({
-										id: sessionParticipants.id,
-										nickname: sessionParticipants.nickname,
-										score: sessionParticipants.score
-									})
-									.from(sessionParticipants)
-									.where(eq(sessionParticipants.sessionId, sessionId))
-									.orderBy(desc(sessionParticipants.score));
-								activeSession.leaderboard = allPlayers;
-								broadcastToPresenters(sessionId, { type: "FINISHED", payload: allPlayers });
-								broadcastToSessionPlayers(sessionId, { type: "FINISHED", payload: allPlayers });
-							} else {
-								activeSession.phase = "leaderboard";
-								const topPlayers = await database
-									.select({
-										id: sessionParticipants.id,
-										nickname: sessionParticipants.nickname,
-										score: sessionParticipants.score
-									})
-									.from(sessionParticipants)
-									.where(eq(sessionParticipants.sessionId, sessionId))
-									.orderBy(desc(sessionParticipants.score))
-									.limit(5);
-								activeSession.leaderboard = topPlayers;
-
-								broadcastToPresenters(sessionId, { type: "LEADERBOARD", payload: topPlayers });
-								broadcastToSessionPlayers(sessionId, { type: "LEADERBOARD", payload: topPlayers });
-							}
-						} else if (activeSession.phase === "leaderboard") {
-							await triggerQuestionPhase(
-								session.quizId,
-								sessionId,
-								activeSession.questionIndex + 1
-							);
-						}
-						return;
-					}
-
-					if (data.type === "STOP_SESSION") {
-						await terminateSessionPlayers(sessionId, "The host stopped the presentation.");
-						await database.delete(quizSessions).where(eq(quizSessions.id, sessionId));
-						activePresenters.delete(sessionId);
+					if (
+						data.type === "START_SESSION" ||
+						data.type === "NEXT_PHASE" ||
+						data.type === "STOP_SESSION"
+					) {
+						sendOwnerCommand(sessionId, "host", { type: data.type, quizId: session.quizId });
 						return;
 					}
 
@@ -498,7 +689,7 @@ presentWs.get(
 							.update(quizSessions)
 							.set({ locked: isLocked })
 							.where(eq(quizSessions.id, sessionId));
-						broadcastToPresenters(sessionId, {
+						publishToPresenters(sessionId, {
 							type: "SESSION_INFO",
 							payload: {
 								sessionId: session.id,
@@ -529,20 +720,6 @@ presentWs.get(
 					for (const conn of presenters) {
 						if (conn.connectionId === connectionId) {
 							presenters.delete(conn);
-							if (presenters.size === 0 && !hostDisconnectGracePeriods.has(sessionId)) {
-								const timeout = setTimeout(() => {
-									hostDisconnectGracePeriods.delete(sessionId);
-									const currentHosts = activePresenters.get(sessionId);
-									if (!currentHosts || currentHosts.size === 0) {
-										terminateSessionPlayers(
-											sessionId,
-											"The host disconnected. Presentation ended."
-										);
-										activePresenters.delete(sessionId);
-									}
-								}, 15000);
-								hostDisconnectGracePeriods.set(sessionId, timeout);
-							}
 							break;
 						}
 					}
@@ -552,169 +729,17 @@ presentWs.get(
 	})
 );
 
-async function triggerQuestionPhase(quizId: string, sessionId: string, questionIndex: number) {
-	const quizQuestions = await database
-		.select()
-		.from(questions)
-		.where(eq(questions.quizId, quizId))
-		.orderBy(questions.position);
-	const targetQ = quizQuestions[questionIndex];
-	if (!targetQ) return;
-
-	const qOptions = await database
-		.select()
-		.from(quizOptions)
-		.where(eq(quizOptions.questionId, targetQ.id))
-		.orderBy(quizOptions.position);
-	const slotColors = qOptions.map((o) => o.color);
-
-	// Server-only: the correct sequence for puzzle questions. Never sent to clients.
-	const correctOrder = targetQ.type === "puzzle" ? qOptions.map((o) => o.id) : null;
-
-	const shuffledOptions = [...qOptions];
-	for (let i = shuffledOptions.length - 1; i > 0; i--) {
-		const j = Math.floor(Math.random() * (i + 1));
-		[shuffledOptions[i], shuffledOptions[j]] = [shuffledOptions[j], shuffledOptions[i]];
-	}
-	shuffledOptions.forEach((opt, idx) => {
-		opt.color = slotColors[idx] ?? opt.color;
-	});
-
-	const presenterPayload = { question: targetQ, options: shuffledOptions, correctOrder };
-
-	// type_answer options ARE the accepted answers, so they must never reach the player.
-	// Puzzle options drop their original `position` (the correct-order answer) and are
-	// identified by shuffled array index on the client instead.
-	const playerOptions =
-		targetQ.type === "type_answer"
-			? []
-			: shuffledOptions.map((o) => ({ id: o.id, text: o.text, color: o.color }));
-
-	let publicSettings: Record<string, number | string> | undefined;
-	const qSettings = targetQ.settings as Record<string, number | string> | null;
-	if (qSettings && targetQ.type === "slider") {
-		publicSettings = { min: qSettings.min, max: qSettings.max, step: qSettings.step };
-	} else if (qSettings && targetQ.type === "scale") {
-		publicSettings = {
-			min: qSettings.min,
-			max: qSettings.max,
-			minLabel: qSettings.minLabel,
-			maxLabel: qSettings.maxLabel
-		};
-	}
-
-	const playerPayload = {
-		question: {
-			id: targetQ.id,
-			text: targetQ.text,
-			type: targetQ.type,
-			timeLimit: targetQ.timeLimit,
-			isMultiSelect: targetQ.isMultiSelect,
-			pointsMultiplier: targetQ.pointsMultiplier,
-			settings: publicSettings
-		},
-		options: playerOptions
-	};
-
-	const previewDurationMs = 5000;
-	const previewServerTime = Date.now();
-	const globalPlayState = (globalThis as any)["__quiz_play_state__"];
-
-	globalPlayState.activeQuestionsBySession.set(sessionId, {
-		phase: "preview",
-		questionIndex,
-		serverTime: previewServerTime,
-		durationMs: previewDurationMs,
-		presenterPayload,
-		playerPayload,
-		responses: new Map<string, any>(),
-		resultsBreakdown: {},
-		leaderboard: []
-	});
-
-	broadcastToPresenters(sessionId, {
-		type: "QUESTION_PREVIEW",
-		serverTime: previewServerTime,
-		durationMs: previewDurationMs,
-		payload: presenterPayload
-	});
-	broadcastToSessionPlayers(sessionId, {
-		type: "QUESTION_PREVIEW",
-		serverTime: previewServerTime,
-		durationMs: previewDurationMs,
-		payload: playerPayload
-	});
-
-	setTimeout(() => {
-		const activeSession = globalPlayState.activeQuestionsBySession.get(sessionId);
-		if (
-			activeSession &&
-			activeSession.phase === "preview" &&
-			activeSession.questionIndex === questionIndex
-		) {
-			const activeServerTime = Date.now();
-			const activeDurationMs = targetQ.timeLimit * 1000;
-
-			activeSession.phase = "active";
-			activeSession.serverTime = activeServerTime;
-			activeSession.durationMs = activeDurationMs;
-
-			broadcastToPresenters(sessionId, {
-				type: "QUESTION_ACTIVE",
-				serverTime: activeServerTime,
-				durationMs: activeDurationMs,
-				payload: presenterPayload
-			});
-			broadcastToSessionPlayers(sessionId, {
-				type: "QUESTION_ACTIVE",
-				serverTime: activeServerTime,
-				durationMs: activeDurationMs,
-				payload: playerPayload
-			});
-
-			setTimeout(() => {
-				const checkSession = globalPlayState.activeQuestionsBySession.get(sessionId);
-				if (
-					checkSession &&
-					checkSession.phase === "active" &&
-					checkSession.questionIndex === questionIndex
-				) {
-					checkSession.phase = "results";
-					const breakdown: Record<string, number> = {};
-					checkSession.responses.forEach((res: any) => {
-						res.selectedOptionIds.forEach((id: string) => {
-							breakdown[id] = (breakdown[id] || 0) + 1;
-						});
-					});
-					checkSession.resultsBreakdown = breakdown;
-
-					broadcastToPresenters(sessionId, {
-						type: "RESULTS",
-						breakdown,
-						payload: checkSession.presenterPayload
-					});
-
-					const correctOptionIds = checkSession.presenterPayload.options
-						.filter((o: any) => o.isCorrect)
-						.map((o: any) => o.id);
-
-					wsByParticipant.forEach((conn: any, pId: string) => {
-						if (conn.sessionId === sessionId && conn.ws.readyState === 1) {
-							const pResponse = checkSession.responses.get(pId);
-							conn.ws.send(
-								JSON.stringify({
-									type: "RESULTS",
-									payload: {
-										correct: pResponse?.isCorrect || false,
-										pointsEarned: pResponse?.pointsEarned || 0,
-										correctOptions: correctOptionIds
-									}
-								})
-							);
-						}
-					});
-				}
-			}, activeDurationMs);
+// Called from src/index.ts's graceful shutdown sequence (via routes/websockets/drain.ts).
+// Releases ownership of every session this pod currently owns FIRST, so another pod's watchdog
+// can take over within one tick instead of waiting out the lease TTL, then closes local
+// connections with a reconnect hint.
+export async function releaseAndDrain() {
+	for (const [sessionId, presenters] of Array.from(activePresenters.entries())) {
+		await releaseOwnership(sessionId);
+		for (const conn of Array.from(presenters)) {
+			try {
+				conn.ws.close(4100, "Server restarting");
+			} catch {}
 		}
-	}, previewDurationMs);
+	}
 }

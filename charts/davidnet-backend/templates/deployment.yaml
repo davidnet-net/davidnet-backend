@@ -7,6 +7,14 @@ metadata:
     app: davidnet-backend
 spec:
   replicas: {{ .Values.replicaCount }}
+  # maxUnavailable: 0 guarantees no capacity dip - the old pod is only killed after the new one is
+  # Ready. maxSurge: 1 bounds the rollout to one extra pod at a time, appropriate for this
+  # cluster's size (vs. the 25%-of-fleet defaults meant for much larger clusters).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: davidnet-backend
@@ -15,6 +23,10 @@ spec:
       labels:
         app: davidnet-backend
     spec:
+      # 3s readiness-propagation wait + WS/HTTP drain + DB/Redis disconnect + margin - set
+      # explicitly rather than left at the k8s default (30s), to match the shutdown sequence in
+      # src/index.ts and the lease timings in quiz_realtime.ts.
+      terminationGracePeriodSeconds: 25
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -50,7 +62,31 @@ spec:
                 - ALL
           ports:
             - containerPort: 3020
+          # readinessProbe fails immediately once graceful shutdown starts (see
+          # src/core/health/shutdownState.ts), dropping this pod from the Service's endpoints
+          # before the drain sequence begins closing connections. livenessProbe hits a separate
+          # unconditional endpoint so an intentionally-draining pod is never killed early by its
+          # own liveness check.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3020
+            periodSeconds: 5
+            failureThreshold: 2
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 3020
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 3
           env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: DB_USER
               valueFrom:
                 secretKeyRef:
@@ -121,3 +157,10 @@ spec:
                 secretKeyRef:
                   name: headscale-secret
                   key: HEADSCALE_REDIRECT_URI
+            - name: REDIS_URL
+              value: "redis://redis.redis.svc.cluster.local:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: REDIS_PASSWORD

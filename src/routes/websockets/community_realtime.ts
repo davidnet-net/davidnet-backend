@@ -6,8 +6,14 @@
 // 50+ player shooter, or a one-way broadcast feed (e.g. a live price ticker, published into the
 // room by one connected client for everyone else to listen to). There is intentionally no cap on
 // room size, queue size, or group size anywhere in this file - only a per-connection
-// message-rate/size guard to protect this single backend instance from a runaway or malicious
-// client, same spirit as the anti-cheat rate limiting in community-games.ts.
+// message-rate/size guard to protect a single pod from a runaway or malicious client, same spirit
+// as the anti-cheat rate limiting in community-games.ts.
+//
+// Cross-pod design: authoritative room membership/state/queues live in Redis (Hashes/Lists), so
+// any pod can answer "who's in this room" correctly regardless of which pod a given client's
+// socket landed on. Each pod keeps a purely LOCAL cache (`localRoomMembers`) of which of its own
+// connected clients are in which room, used only to know who to deliver an incoming pub/sub
+// message to - never consulted for membership snapshots, which always come from Redis.
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
@@ -16,6 +22,7 @@ import { verify } from "hono/jwt";
 
 import { database } from "../../core/database/client";
 import { accountModerationStatus, communityGame, users } from "../../core/database/schema/schema";
+import { redis, redisSub } from "../../core/shared/redis";
 
 // --- TYPES ---
 type Member = {
@@ -31,35 +38,123 @@ type RealtimeClient = {
 	gameId: string;
 	member: Member;
 	rooms: Set<string>;
+	queues: Set<string>;
 	messageTimestamps: number[];
 	missedPongs: number;
 };
 
-type QueueEntry = {
-	client: RealtimeClient;
+type QueueEntryPayload = {
+	connectionId: string;
+	member: Member;
 	metadata: unknown;
 	joinedAt: number;
 };
 
-// --- IN-MEMORY STATE ---
-// Single backend instance only (no replicas today - see Helm chart). Kept in `globalThis` so it
-// survives `bun --hot` reloads in dev, same pattern as the quiz websocket routes.
+type RoomEnvelope =
+	| { scope: "room"; room: string; frame: unknown; exclude: string | null }
+	| { scope: "game"; frame: unknown; exclude: string | null }
+	| { scope: "matched"; room: string; queue: string; members: Member[]; connectionIds: string[] };
+
+// --- LOCAL (THIS POD ONLY) STATE ---
+// Kept in `globalThis` so it survives `bun --hot` reloads in dev, same pattern as the quiz
+// websocket routes.
 const GLOBAL_STATE_KEY = "__community_realtime_state__";
 if (!(globalThis as any)[GLOBAL_STATE_KEY]) {
 	(globalThis as any)[GLOBAL_STATE_KEY] = {
-		roomMembers: new Map<string, Map<string, Set<RealtimeClient>>>(),
-		// Per-room key/value store for realtime.setState - the latest value per key, handed out as a
-		// snapshot to anyone who joins the room. Cleared whenever the room itself is (room empties).
-		roomState: new Map<string, Map<string, Map<string, unknown>>>(),
-		queues: new Map<string, Map<string, QueueEntry[]>>(),
+		localRoomMembers: new Map<string, Map<string, Set<RealtimeClient>>>(),
 		allClients: new Set<RealtimeClient>()
 	};
 }
 const state = (globalThis as any)[GLOBAL_STATE_KEY];
-const roomMembers: Map<string, Map<string, Set<RealtimeClient>>> = state.roomMembers;
-const roomState: Map<string, Map<string, Map<string, unknown>>> = state.roomState;
-const queues: Map<string, Map<string, QueueEntry[]>> = state.queues;
+const localRoomMembers: Map<string, Map<string, Set<RealtimeClient>>> = state.localRoomMembers;
 const allClients: Set<RealtimeClient> = state.allClients;
+
+// --- REDIS KEYS / CHANNEL ---
+const membersKey = (gameId: string, room: string) => `cg:members:${gameId}:${room}`;
+const stateKey = (gameId: string, room: string) => `cg:state:${gameId}:${room}`;
+const queueKey = (gameId: string, queue: string) => `cg:queue:${gameId}:${queue}`;
+const channelFor = (gameId: string) => `cg:game:${gameId}`;
+const CHANNEL_PATTERN = "cg:game:*";
+
+function publishEnvelope(gameId: string, envelope: RoomEnvelope) {
+	void redis.publish(channelFor(gameId), JSON.stringify(envelope));
+}
+
+// Atomically pushes this entry onto the queue and, if that push reached groupSize, pops exactly
+// that many entries in the same round trip - two pods racing on the same queue can't both see
+// "length >= groupSize" and double-pop overlapping groups, because the whole push-then-maybe-pop
+// happens as one Lua script.
+const JOIN_QUEUE_SCRIPT = `
+redis.call("RPUSH", KEYS[1], ARGV[1])
+local len = redis.call("LLEN", KEYS[1])
+if len >= tonumber(ARGV[2]) then
+  local popped = redis.call("LPOP", KEYS[1], tonumber(ARGV[2]))
+  return { len, popped }
+else
+  return { len, false }
+end
+`;
+
+// --- PUB/SUB DISPATCH (one subscription per pod, not per room) ---
+const GLOBAL_SUBSCRIBE_KEY = "__community_realtime_subscribed__";
+if (!(globalThis as any)[GLOBAL_SUBSCRIBE_KEY]) {
+	redisSub.psubscribe(CHANNEL_PATTERN).catch((err) => {
+		console.error("[CommunityRealtime]: Failed to subscribe to Redis channel:", err);
+	});
+
+	redisSub.on("pmessage", (pattern: string, channel: string, message: string) => {
+		if (pattern !== CHANNEL_PATTERN) return;
+		const gameId = channel.slice("cg:game:".length);
+
+		let envelope: RoomEnvelope;
+		try {
+			envelope = JSON.parse(message);
+		} catch {
+			return;
+		}
+
+		if (envelope.scope === "room") {
+			const members = localRoomMembers.get(gameId)?.get(envelope.room);
+			if (!members) return;
+			const msgStr = JSON.stringify(envelope.frame);
+			for (const member of members) {
+				if (member.connectionId === envelope.exclude) continue;
+				if (member.ws && member.ws.readyState === 1) member.ws.send(msgStr);
+			}
+			return;
+		}
+
+		if (envelope.scope === "game") {
+			const msgStr = JSON.stringify(envelope.frame);
+			for (const client of allClients) {
+				if (client.gameId !== gameId || client.connectionId === envelope.exclude) continue;
+				if (client.ws && client.ws.readyState === 1) client.ws.send(msgStr);
+			}
+			return;
+		}
+
+		if (envelope.scope === "matched") {
+			for (const client of allClients) {
+				if (client.gameId !== gameId) continue;
+				if (!envelope.connectionIds.includes(client.connectionId)) continue;
+
+				getOrCreateLocalRoomSet(gameId, envelope.room).add(client);
+				client.rooms.add(envelope.room);
+				client.queues.delete(envelope.queue);
+
+				sendTo(client, {
+					type: "matched",
+					queue: envelope.queue,
+					room: envelope.room,
+					members: envelope.members
+				});
+			}
+			return;
+		}
+	});
+
+	(globalThis as any)[GLOBAL_SUBSCRIBE_KEY] = true;
+}
 
 // --- HEARTBEAT ---
 // The server actively pings every connected client and evicts anyone who stops answering, so a
@@ -69,11 +164,11 @@ const allClients: Set<RealtimeClient> = state.allClients;
 const HEARTBEAT_TICK_MS = 5000;
 const DEAD_MISSED_TICKS = 3; // ~15s of silence before a connection is considered dead
 
-function cleanupClient(client: RealtimeClient) {
+async function cleanupClient(client: RealtimeClient) {
 	for (const room of Array.from(client.rooms)) {
-		leaveRoom(client, room);
+		await leaveRoom(client, room);
 	}
-	leaveAllQueues(client);
+	await leaveAllQueues(client);
 	allClients.delete(client);
 }
 
@@ -84,7 +179,7 @@ if ((globalThis as any)[GLOBAL_INTERVAL_KEY]) {
 (globalThis as any)[GLOBAL_INTERVAL_KEY] = setInterval(() => {
 	for (const client of Array.from(allClients)) {
 		if (!client.ws || client.ws.readyState !== 1) {
-			cleanupClient(client);
+			void cleanupClient(client);
 			continue;
 		}
 
@@ -92,7 +187,7 @@ if ((globalThis as any)[GLOBAL_INTERVAL_KEY]) {
 			try {
 				client.ws.close(4008, "Heartbeat Timeout");
 			} catch {}
-			cleanupClient(client);
+			void cleanupClient(client);
 			continue;
 		}
 
@@ -151,12 +246,12 @@ async function isBanned(userId: string): Promise<boolean> {
 	}
 }
 
-// --- ROOM HELPERS ---
-function getOrCreateRoom(gameId: string, room: string): Set<RealtimeClient> {
-	let gameRooms = roomMembers.get(gameId);
+// --- LOCAL ROOM-TRACKING HELPERS (this pod's own connections only) ---
+function getOrCreateLocalRoomSet(gameId: string, room: string): Set<RealtimeClient> {
+	let gameRooms = localRoomMembers.get(gameId);
 	if (!gameRooms) {
 		gameRooms = new Map();
-		roomMembers.set(gameId, gameRooms);
+		localRoomMembers.set(gameId, gameRooms);
 	}
 	let members = gameRooms.get(room);
 	if (!members) {
@@ -166,32 +261,12 @@ function getOrCreateRoom(gameId: string, room: string): Set<RealtimeClient> {
 	return members;
 }
 
-function removeRoomIfEmpty(gameId: string, room: string) {
-	const gameRooms = roomMembers.get(gameId);
+function removeLocalRoomSetIfEmpty(gameId: string, room: string) {
+	const gameRooms = localRoomMembers.get(gameId);
 	if (!gameRooms) return;
 	const members = gameRooms.get(room);
-	if (members && members.size === 0) {
-		gameRooms.delete(room);
-		// The state channel is scoped to the room's lifetime, same as presence - a fresh room starts
-		// with a clean slate, it doesn't resurrect whatever the last occupants left behind.
-		roomState.get(gameId)?.delete(room);
-		if (roomState.get(gameId)?.size === 0) roomState.delete(gameId);
-	}
-	if (gameRooms.size === 0) roomMembers.delete(gameId);
-}
-
-function getOrCreateRoomState(gameId: string, room: string): Map<string, unknown> {
-	let gameRoomState = roomState.get(gameId);
-	if (!gameRoomState) {
-		gameRoomState = new Map();
-		roomState.set(gameId, gameRoomState);
-	}
-	let keys = gameRoomState.get(room);
-	if (!keys) {
-		keys = new Map();
-		gameRoomState.set(room, keys);
-	}
-	return keys;
+	if (members && members.size === 0) gameRooms.delete(room);
+	if (gameRooms.size === 0) localRoomMembers.delete(gameId);
 }
 
 function sendTo(client: RealtimeClient, frame: unknown) {
@@ -200,50 +275,59 @@ function sendTo(client: RealtimeClient, frame: unknown) {
 	}
 }
 
-function broadcastToRoomMembers(
-	gameId: string,
-	room: string,
-	frame: unknown,
-	exclude?: RealtimeClient
-) {
-	const members = roomMembers.get(gameId)?.get(room);
-	if (!members) return;
-	const msgStr = JSON.stringify(frame);
-	for (const member of members) {
-		if (member === exclude) continue;
-		if (member.ws && member.ws.readyState === 1) member.ws.send(msgStr);
-	}
+async function joinRoom(client: RealtimeClient, room: string) {
+	await redis.hset(
+		membersKey(client.gameId, room),
+		client.connectionId,
+		JSON.stringify(client.member)
+	);
+	getOrCreateLocalRoomSet(client.gameId, room).add(client);
+	client.rooms.add(room);
 }
 
-// Lobby-wide: every client currently connected to this game's realtime namespace, independent of
-// room membership - used for realtime.announce.
-function broadcastToGameClients(gameId: string, frame: unknown, exclude?: RealtimeClient) {
-	const msgStr = JSON.stringify(frame);
-	for (const client of allClients) {
-		if (client.gameId !== gameId || client === exclude) continue;
-		if (client.ws && client.ws.readyState === 1) client.ws.send(msgStr);
-	}
-}
-
-function leaveRoom(client: RealtimeClient, room: string) {
+async function leaveRoom(client: RealtimeClient, room: string) {
 	if (!client.rooms.has(room)) return;
 	client.rooms.delete(room);
-	roomMembers.get(client.gameId)?.get(room)?.delete(client);
-	broadcastToRoomMembers(client.gameId, room, {
-		type: "presence",
+	getOrCreateLocalRoomSet(client.gameId, room).delete(client);
+	removeLocalRoomSetIfEmpty(client.gameId, room);
+
+	await redis.hdel(membersKey(client.gameId, room), client.connectionId);
+	publishEnvelope(client.gameId, {
+		scope: "room",
 		room,
-		event: "leave",
-		member: client.member
+		frame: { type: "presence", room, event: "leave", member: client.member },
+		exclude: null
 	});
-	removeRoomIfEmpty(client.gameId, room);
+
+	// Two pods racing to both notice "empty" and both issue DEL is harmless - idempotent.
+	const remaining = await redis.hlen(membersKey(client.gameId, room));
+	if (remaining === 0) {
+		await redis.del(membersKey(client.gameId, room));
+		await redis.del(stateKey(client.gameId, room));
+	}
 }
 
-function leaveAllQueues(client: RealtimeClient) {
-	const gameQueues = queues.get(client.gameId);
-	if (!gameQueues) return;
-	for (const entries of gameQueues.values()) {
-		const idx = entries.findIndex((e) => e.client === client);
-		if (idx !== -1) entries.splice(idx, 1);
+async function leaveAllQueues(client: RealtimeClient) {
+	for (const queueName of Array.from(client.queues)) {
+		await leaveQueueEntry(client, queueName);
+	}
+}
+
+async function leaveQueueEntry(client: RealtimeClient, queueName: string) {
+	client.queues.delete(queueName);
+	const key = queueKey(client.gameId, queueName);
+	const entries = await redis.lrange(key, 0, -1);
+	for (const raw of entries) {
+		let parsed: QueueEntryPayload;
+		try {
+			parsed = JSON.parse(raw);
+		} catch {
+			continue;
+		}
+		if (parsed.connectionId === client.connectionId) {
+			await redis.lrem(key, 1, raw);
+			break;
+		}
 	}
 }
 
@@ -311,6 +395,7 @@ communityRealtimeWs.get(
 			gameId,
 			member,
 			rooms: new Set(),
+			queues: new Set(),
 			messageTimestamps: [],
 			missedPongs: 0
 		};
@@ -321,7 +406,7 @@ communityRealtimeWs.get(
 				allClients.add(client);
 			},
 
-			onMessage(event, ws) {
+			async onMessage(event, ws) {
 				client.ws = ws;
 
 				const raw = typeof event.data === "string" ? event.data : event.data.toString();
@@ -374,11 +459,16 @@ communityRealtimeWs.get(
 							return;
 						}
 
-						const members = getOrCreateRoom(gameId, room);
-						const snapshot = Array.from(members).map((m) => m.member);
-						const stateSnapshot = Object.fromEntries(getOrCreateRoomState(gameId, room));
-						members.add(client);
-						client.rooms.add(room);
+						const [rawMembers, rawState] = await Promise.all([
+							redis.hgetall(membersKey(gameId, room)),
+							redis.hgetall(stateKey(gameId, room))
+						]);
+						const snapshot = Object.values(rawMembers).map((m) => JSON.parse(m) as Member);
+						const stateSnapshot = Object.fromEntries(
+							Object.entries(rawState).map(([k, v]) => [k, JSON.parse(v)])
+						);
+
+						await joinRoom(client, room);
 
 						sendTo(client, {
 							type: "ack",
@@ -388,18 +478,18 @@ communityRealtimeWs.get(
 							members: snapshot,
 							state: stateSnapshot
 						});
-						broadcastToRoomMembers(
-							gameId,
+						publishEnvelope(gameId, {
+							scope: "room",
 							room,
-							{ type: "presence", room, event: "join", member: client.member },
-							client
-						);
+							frame: { type: "presence", room, event: "join", member: client.member },
+							exclude: client.connectionId
+						});
 						return;
 					}
 
 					case "leave": {
 						const room = typeof data.room === "string" ? data.room : "";
-						leaveRoom(client, room);
+						await leaveRoom(client, room);
 						sendTo(client, { type: "ack", reqId, ok: true, room });
 						return;
 					}
@@ -412,9 +502,10 @@ communityRealtimeWs.get(
 						}
 
 						// Deliberately does NOT join the room or create it - just a read-only peek, same
-						// info a joiner would see in their own join ack's "members" field.
-						const members = roomMembers.get(gameId)?.get(room);
-						const snapshot = members ? Array.from(members).map((m) => m.member) : [];
+						// info a joiner would see in their own join ack's "members" field. Always reads
+						// from Redis, so it's correct regardless of which pod each member is connected to.
+						const rawMembers = await redis.hgetall(membersKey(gameId, room));
+						const snapshot = Object.values(rawMembers).map((m) => JSON.parse(m) as Member);
 
 						sendTo(client, {
 							type: "ack",
@@ -444,20 +535,24 @@ communityRealtimeWs.get(
 							return;
 						}
 
-						const keys = getOrCreateRoomState(gameId, room);
-						if (!keys.has(key) && keys.size >= MAX_STATE_KEYS_PER_ROOM) {
-							sendTo(client, { type: "ack", reqId, ok: false, code: "STATE_LIMIT_REACHED" });
-							return;
+						const sKey = stateKey(gameId, room);
+						const alreadyHasKey = await redis.hexists(sKey, key);
+						if (!alreadyHasKey) {
+							const keyCount = await redis.hlen(sKey);
+							if (keyCount >= MAX_STATE_KEYS_PER_ROOM) {
+								sendTo(client, { type: "ack", reqId, ok: false, code: "STATE_LIMIT_REACHED" });
+								return;
+							}
 						}
 
-						keys.set(key, data.value);
+						await redis.hset(sKey, key, JSON.stringify(data.value));
 						sendTo(client, { type: "ack", reqId, ok: true, room, key });
-						broadcastToRoomMembers(
-							gameId,
+						publishEnvelope(gameId, {
+							scope: "room",
 							room,
-							{ type: "state", room, key, value: data.value, from: client.member },
-							client
-						);
+							frame: { type: "state", room, key, value: data.value, from: client.member },
+							exclude: client.connectionId
+						});
 						return;
 					}
 
@@ -468,7 +563,11 @@ communityRealtimeWs.get(
 							from: client.member,
 							ts: Date.now()
 						};
-						broadcastToGameClients(gameId, frame, data.echo ? undefined : client);
+						publishEnvelope(gameId, {
+							scope: "game",
+							frame,
+							exclude: data.echo ? null : client.connectionId
+						});
 						sendTo(client, { type: "ack", reqId, ok: true });
 						return;
 					}
@@ -491,7 +590,12 @@ communityRealtimeWs.get(
 							from: client.member,
 							ts: Date.now()
 						};
-						broadcastToRoomMembers(gameId, room, frame, data.echo ? undefined : client);
+						publishEnvelope(gameId, {
+							scope: "room",
+							room,
+							frame,
+							exclude: data.echo ? null : client.connectionId
+						});
 						return;
 					}
 
@@ -503,52 +607,61 @@ communityRealtimeWs.get(
 							return;
 						}
 
-						let gameQueues = queues.get(gameId);
-						if (!gameQueues) {
-							gameQueues = new Map();
-							queues.set(gameId, gameQueues);
-						}
-						let entries = gameQueues.get(queueName);
-						if (!entries) {
-							entries = [];
-							gameQueues.set(queueName, entries);
-						}
+						client.queues.add(queueName);
+						const entry: QueueEntryPayload = {
+							connectionId: client.connectionId,
+							member: client.member,
+							metadata: data.metadata,
+							joinedAt: Date.now()
+						};
 
-						if (!entries.some((e) => e.client === client)) {
-							entries.push({ client, metadata: data.metadata, joinedAt: Date.now() });
-						}
+						const [len, popped] = (await redis.eval(
+							JOIN_QUEUE_SCRIPT,
+							1,
+							queueKey(gameId, queueName),
+							JSON.stringify(entry),
+							String(groupSize)
+						)) as [number, string[] | false];
 
 						sendTo(client, {
 							type: "ack",
 							reqId,
 							ok: true,
 							queue: queueName,
-							position: entries.length
+							position: len
 						});
 
 						// Group-of-N FIFO matching. `groupSize` is treated as a property of the queue name
 						// itself - callers joining the same queue should agree on the same size.
-						if (entries.length >= groupSize) {
-							const matched = entries.splice(0, groupSize);
+						if (popped) {
+							const matched = popped.map((raw) => JSON.parse(raw) as QueueEntryPayload);
 							const room = crypto.randomUUID();
-							const members = matched.map((e) => e.client.member);
+							const members = matched.map((e) => e.member);
+							const connectionIds = matched.map((e) => e.connectionId);
 
-							for (const entry of matched) {
-								getOrCreateRoom(gameId, room).add(entry.client);
-								entry.client.rooms.add(room);
-								sendTo(entry.client, { type: "matched", queue: queueName, room, members });
+							// Pre-seed membership in Redis so a HGETALL/roomInfo from any pod sees the full
+							// matched group immediately, even before each pod's own "matched" dispatch (below)
+							// finishes joining its local clients.
+							const membersEntries: Record<string, string> = {};
+							for (const e of matched) membersEntries[e.connectionId] = JSON.stringify(e.member);
+							if (Object.keys(membersEntries).length > 0) {
+								await redis.hset(membersKey(gameId, room), membersEntries);
 							}
+
+							publishEnvelope(gameId, {
+								scope: "matched",
+								room,
+								queue: queueName,
+								members,
+								connectionIds
+							});
 						}
 						return;
 					}
 
 					case "leaveQueue": {
 						const queueName = typeof data.queue === "string" ? data.queue : "";
-						const entries = queues.get(gameId)?.get(queueName);
-						if (entries) {
-							const idx = entries.findIndex((e) => e.client === client);
-							if (idx !== -1) entries.splice(idx, 1);
-						}
+						await leaveQueueEntry(client, queueName);
 						sendTo(client, { type: "ack", reqId, ok: true, queue: queueName });
 						return;
 					}
@@ -561,13 +674,13 @@ communityRealtimeWs.get(
 						}
 
 						// Deliberately does NOT join the queue - just a read-only peek.
-						const entries = queues.get(gameId)?.get(queueName);
+						const waiting = await redis.llen(queueKey(gameId, queueName));
 						sendTo(client, {
 							type: "ack",
 							reqId,
 							ok: true,
 							queue: queueName,
-							waiting: entries ? entries.length : 0
+							waiting
 						});
 						return;
 					}
@@ -575,8 +688,24 @@ communityRealtimeWs.get(
 			},
 
 			onClose() {
-				cleanupClient(client);
+				void cleanupClient(client);
 			}
 		};
 	})
 );
+
+// Called from src/index.ts's graceful shutdown sequence (via routes/websockets/drain.ts). Best
+// effort: release this pod's membership for every locally-connected client, then close their
+// sockets with a reconnect hint so they move to whichever pod survives.
+export async function releaseAndDrain() {
+	const clients = Array.from(allClients);
+	for (const client of clients) {
+		sendTo(client, { type: "reconnect", code: 4100, message: "Server restarting" });
+	}
+	await Promise.allSettled(clients.map((client) => cleanupClient(client)));
+	for (const client of clients) {
+		try {
+			client.ws?.close(4100, "Server restarting");
+		} catch {}
+	}
+}

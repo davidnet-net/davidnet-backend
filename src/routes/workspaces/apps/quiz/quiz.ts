@@ -35,7 +35,7 @@ const normalizeId = (id: string | number | undefined | null): string => {
 // --- CREATE QUIZ ---
 quiz.post(
 	"/create",
-	createRateLimiter(15, 15 * 60 * 1000),
+	createRateLimiter(15, 15 * 60 * 1000, { name: "quiz-create" }),
 	sValidator("json", createQuizSchema),
 	requirePerm("quiz:create"),
 	async (c) => {

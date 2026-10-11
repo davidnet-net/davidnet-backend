@@ -22,6 +22,7 @@ import {
 	quizzes
 } from "../../core/database/schema/quiz";
 import { hasPermission } from "../../core/shared/checkPermissions";
+import { POD_ID, redis, redisSub } from "../../core/shared/redis";
 import { sanitizeValue } from "../../middlewares/sanitizeUnicode";
 
 const OWN_QUIZ_IMAGE_URL_PREFIX = "https://davidnet-backend.davidnet.net/quiz-media/";
@@ -57,6 +58,90 @@ const roomAwareness = new Map<string, Awareness>();
 const clientIDsByWs = new WeakMap<any, Set<number>>();
 const wsCanManage = new WeakMap<any, boolean>();
 const wsIsAlive = new WeakMap<any, boolean>();
+
+// --- CROSS-POD REPLICATION ---
+// Every pod with ≥1 local client for a given quizId keeps its own local Y.Doc replica (above,
+// `quizRooms`) and relays updates to/from the other pods that also have local clients for that
+// quizId via Redis pub/sub. No single pod "owns" the document - Yjs updates are CRDT and
+// mergeable, so convergence doesn't depend on ordering or on a single authoritative writer.
+const docChannel = (quizId: string) => `qedit:${quizId}`;
+const awarenessChannel = (quizId: string) => `qedit-awareness:${quizId}`;
+const lockKey = (quizId: string) => `qedit:lock:${quizId}`;
+
+// Every published message is prefixed with this pod's 8-byte random nonce so this same pod can
+// recognize (and ignore) its own publish echoing back through its own Redis subscription -
+// without this, a pod would re-apply and re-relay a message it already handled locally.
+const PUB_NONCE = crypto.getRandomValues(new Uint8Array(8));
+
+function publishWithNonce(channel: string, frame: Uint8Array) {
+	const withNonce = Buffer.concat([Buffer.from(PUB_NONCE), Buffer.from(frame)]);
+	void redis.publish(channel, withNonce);
+}
+
+function isOwnEcho(payload: Buffer): boolean {
+	if (payload.length < PUB_NONCE.length) return false;
+	for (let i = 0; i < PUB_NONCE.length; i++) {
+		if (payload[i] !== PUB_NONCE[i]) return false;
+	}
+	return true;
+}
+
+const subscribedQuizChannels = new Set<string>();
+
+async function subscribeQuizChannels(quizId: string) {
+	if (subscribedQuizChannels.has(quizId)) return;
+	subscribedQuizChannels.add(quizId);
+	await redisSub.subscribe(docChannel(quizId), awarenessChannel(quizId));
+}
+
+async function unsubscribeQuizChannels(quizId: string) {
+	if (!subscribedQuizChannels.has(quizId)) return;
+	subscribedQuizChannels.delete(quizId);
+	await redisSub.unsubscribe(docChannel(quizId), awarenessChannel(quizId));
+}
+
+const GLOBAL_MESSAGE_LISTENER_KEY = "__quiz_edit_messageBuffer_listener__";
+if (!(globalThis as any)[GLOBAL_MESSAGE_LISTENER_KEY]) {
+	redisSub.on("messageBuffer", (channelBuf: Buffer, messageBuf: Buffer) => {
+		const channel = channelBuf.toString();
+		if (isOwnEcho(messageBuf)) return;
+		const framed = messageBuf.subarray(PUB_NONCE.length);
+
+		if (channel.startsWith("qedit-awareness:")) {
+			const quizId = channel.slice("qedit-awareness:".length);
+			const awareness = roomAwareness.get(quizId);
+			const payload = framed.subarray(1); // strip the leading message-type byte
+			if (awareness) applyAwarenessUpdate(awareness, payload, "redis-remote");
+
+			const clients = roomClients.get(quizId);
+			if (clients) {
+				for (const client of clients) client.send(framed);
+			}
+			return;
+		}
+
+		if (channel.startsWith("qedit:")) {
+			const quizId = channel.slice("qedit:".length);
+			const doc = quizRooms.get(quizId);
+			const payload = framed.subarray(1); // strip the leading message-type byte
+			if (doc) Y.applyUpdate(doc, payload, "redis-remote");
+
+			const clients = roomClients.get(quizId);
+			if (clients) {
+				for (const client of clients) client.send(framed);
+			}
+		}
+	});
+	(globalThis as any)[GLOBAL_MESSAGE_LISTENER_KEY] = true;
+}
+
+// SET NX so only one pod's debounced timer actually writes per quizId at a time - losing the race
+// is harmless, since the doc already converged across every pod via pub/sub before either side's
+// debounce timer fired, so whichever pod does persist writes the same fully-converged content.
+async function acquirePersistLock(quizId: string): Promise<boolean> {
+	const result = await redis.set(lockKey(quizId), POD_ID, "EX", 5, "NX");
+	return result === "OK";
+}
 
 export const editWs = new Hono<{
 	Variables: {
@@ -317,6 +402,11 @@ async function persistQuizToDatabase(quizId: string, doc: Y.Doc) {
 	}
 }
 
+async function persistQuizToDatabaseWithLock(quizId: string, doc: Y.Doc) {
+	if (!(await acquirePersistLock(quizId))) return;
+	await persistQuizToDatabase(quizId, doc);
+}
+
 function scheduleSave(quizId: string, doc: Y.Doc) {
 	const now = Date.now();
 	const last = lastSaved.get(quizId) || now;
@@ -324,13 +414,13 @@ function scheduleSave(quizId: string, doc: Y.Doc) {
 	if (saveTimeouts.has(quizId)) clearTimeout(saveTimeouts.get(quizId)!);
 
 	if (now - last > 30000) {
-		persistQuizToDatabase(quizId, doc);
+		void persistQuizToDatabaseWithLock(quizId, doc);
 		lastSaved.set(quizId, now);
 		return;
 	}
 
 	const timeout = setTimeout(() => {
-		persistQuizToDatabase(quizId, doc);
+		void persistQuizToDatabaseWithLock(quizId, doc);
 		lastSaved.set(quizId, Date.now());
 		saveTimeouts.delete(quizId);
 	}, 3000);
@@ -419,6 +509,7 @@ editWs.get(
 
 				if (!roomClients.has(quizId)) roomClients.set(quizId, new Set());
 				roomClients.get(quizId)?.add(ws);
+				await subscribeQuizChannels(quizId);
 
 				let doc = quizRooms.get(quizId);
 				let awareness = roomAwareness.get(quizId);
@@ -438,6 +529,7 @@ editWs.get(
 									client.send(updateMessage.buffer);
 								}
 							}
+							publishWithNonce(docChannel(quizId), updateMessage);
 						}
 					});
 
@@ -498,6 +590,7 @@ editWs.get(
 									for (const client of clients) {
 										client.send(message.buffer);
 									}
+									publishWithNonce(awarenessChannel(quizId), message);
 								}
 							}
 						}
@@ -554,6 +647,7 @@ editWs.get(
 							if (client !== ws) client.send(data);
 						}
 					}
+					publishWithNonce(docChannel(quizId), data);
 
 					if (!userCanManage && quizMetaSnapshot) {
 						let mutated = false;
@@ -591,6 +685,7 @@ editWs.get(
 							if (client !== ws) client.send(data);
 						}
 					}
+					publishWithNonce(awarenessChannel(quizId), data);
 				}
 			},
 
@@ -619,12 +714,31 @@ editWs.get(
 								saveTimeouts.delete(quizId);
 							}
 							lastSaved.delete(quizId);
-							await persistQuizToDatabase(quizId, doc);
+							await persistQuizToDatabaseWithLock(quizId, doc);
 							quizRooms.delete(quizId);
 						}
+
+						await unsubscribeQuizChannels(quizId);
 					}
 				}
 			}
 		};
 	})
 );
+
+// Called from src/index.ts's graceful shutdown sequence (via routes/websockets/drain.ts).
+// Best-effort final persist (lock-gated - harmless to skip if another pod wins the race, since
+// the doc already converged across every pod via pub/sub) for every quiz this pod has local
+// clients in, then closes those sockets with a reconnect hint.
+export async function releaseAndDrain() {
+	for (const [quizId, clients] of Array.from(roomClients.entries())) {
+		const doc = quizRooms.get(quizId);
+		if (doc) await persistQuizToDatabaseWithLock(quizId, doc);
+
+		for (const ws of Array.from(clients)) {
+			try {
+				ws.close(4100, "Server restarting");
+			} catch {}
+		}
+	}
+}

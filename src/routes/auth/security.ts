@@ -18,7 +18,7 @@ export const security = new Hono<Env>();
 security.post(
 	"/change-password",
 	requireAuth,
-	createRateLimiter(5, 15 * 60 * 1000),
+	createRateLimiter(5, 15 * 60 * 1000, { name: "security-change-password" }),
 	sValidator("json", changePasswordSchema),
 	async (c) => {
 		const userID = c.get("user").id;
@@ -383,7 +383,7 @@ security.put("/disable-authenticator", requireAuth, async (c) => {
 
 security.post(
 	"/generate-recovery-codes",
-	createRateLimiter(5, 15 * 60 * 1000),
+	createRateLimiter(5, 15 * 60 * 1000, { name: "security-generate-recovery-codes" }),
 	requireAuth,
 	async (c) => {
 		const userID = c.get("user").id;
