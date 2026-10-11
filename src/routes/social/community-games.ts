@@ -142,6 +142,19 @@ const MIN_SESSION_AGE_MS = 1_500;
 // once, not a security hole.
 const MIN_SUBMIT_INTERVAL_MS = 2_000;
 const lastSignedSubmissionByResource = new Map<string, number>();
+// Every distinct (session, resource) pair ever submitted stays in the map above forever
+// otherwise - unbounded growth for the life of the process. An entry is only ever consulted
+// within MIN_SUBMIT_INTERVAL_MS of being written, so anything older than that is dead weight;
+// sweep it out periodically with a generous safety margin.
+setInterval(
+	() => {
+		const cutoff = Date.now() - MIN_SUBMIT_INTERVAL_MS * 10;
+		for (const [key, timestamp] of lastSignedSubmissionByResource) {
+			if (timestamp < cutoff) lastSignedSubmissionByResource.delete(key);
+		}
+	},
+	5 * 60 * 1000
+).unref?.();
 const HEX_PATTERN = /^[0-9a-f]+$/i;
 
 // --- ANTI-SANDBOX-BYPASS: short-lived embed token for the game's index.html ---

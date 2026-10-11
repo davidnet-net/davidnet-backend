@@ -28,6 +28,20 @@ export const createRateLimiter = (
 	const store = new Map<string, { count: number; resetTime: number }>();
 	const keyFn = options.keyFn ?? ((c: Context) => c.get("metadata").ip);
 
+	// Without this, every distinct key this limiter has ever seen - every IP, or for a per-user
+	// limiter every user+game/user+resource pair - stays in `store` forever, even long after its
+	// window closed. The map only ever grows, for the life of the process. Sweep out anything
+	// whose window has already expired; it's always safe to delete, since the next request for
+	// that key would just start a fresh window from scratch anyway.
+	const sweepIntervalMs = Math.max(windowMs, 60_000);
+	const sweepTimer = setInterval(() => {
+		const now = Date.now();
+		for (const [key, record] of store) {
+			if (now > record.resetTime) store.delete(key);
+		}
+	}, sweepIntervalMs);
+	sweepTimer.unref?.();
+
 	const getStatus = (key: string): RateLimitStatus => {
 		const now = Date.now();
 		const record = store.get(key);
