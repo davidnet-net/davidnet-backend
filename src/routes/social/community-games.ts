@@ -144,6 +144,43 @@ const MIN_SUBMIT_INTERVAL_MS = 2_000;
 const lastSignedSubmissionByResource = new Map<string, number>();
 const HEX_PATTERN = /^[0-9a-f]+$/i;
 
+// --- ANTI-SANDBOX-BYPASS: short-lived embed token for the game's index.html ---
+// The Sec-Fetch-Dest check on the file route below (only load as an "iframe") is a good signal
+// when it's present, but it's sent by the BROWSER, not guaranteed on every browser/version/
+// configuration - failing open when it's simply absent (the only sane choice, since failing
+// closed would also break the legitimate iframe case for that same browser) leaves a real gap:
+// someone can still just paste the raw /file/index.html URL into a browser that doesn't send it.
+// This token is the actual gate: GET /:id (which the player page always calls before rendering
+// the iframe) hands back a token good for EMBED_TOKEN_TTL_MS, and the file route below refuses to
+// serve index.html without a valid, unexpired one. A raw shared/bookmarked URL stops working
+// within minutes regardless of what the requesting browser sends.
+const EMBED_TOKEN_TTL_MS = 30 * 60 * 1000; // 30 minutes - covers a normal play session
+function getEmbedTokenSecret(): string {
+	const secret = process.env.JWT_ACCESS_SECRET;
+	if (!secret) throw new Error("JWT_ACCESS_SECRET is not configured");
+	return secret;
+}
+function createEmbedToken(gameId: string): { token: string; expiresAt: number } {
+	const expiresAt = Date.now() + EMBED_TOKEN_TTL_MS;
+	const token = createHmac("sha256", getEmbedTokenSecret())
+		.update(`embed:${gameId}:${expiresAt}`)
+		.digest("hex");
+	return { token, expiresAt };
+}
+function verifyEmbedToken(gameId: string, token: string | undefined, expiresAtRaw: string | undefined): boolean {
+	const expiresAt = Number(expiresAtRaw);
+	if (!token || !HEX_PATTERN.test(token) || !Number.isFinite(expiresAt)) return false;
+	if (Date.now() > expiresAt) return false;
+
+	const expected = createHmac("sha256", getEmbedTokenSecret())
+		.update(`embed:${gameId}:${expiresAt}`)
+		.digest("hex");
+
+	const tokenBuffer = Buffer.from(token, "hex");
+	const expectedBuffer = Buffer.from(expected, "hex");
+	return tokenBuffer.length === expectedBuffer.length && timingSafeEqual(tokenBuffer, expectedBuffer);
+}
+
 // --- PLAYTIME ---
 // A single ping can only move the total forward by this much, regardless of what the client
 // claims - the player page pings roughly every 30s of visible playtime, so this just needs enough
@@ -1543,12 +1580,16 @@ communityGamesRoute.get("/:id", requireAuth, async (c) => {
 			isLiked = Boolean(likeRecord);
 		}
 
+		const { token: embedToken, expiresAt: embedTokenExpiresAt } = createEmbedToken(id);
+
 		return c.json({
 			success: true,
 			code: "SUCCESS",
 			game: {
 				...game,
-				isLiked
+				isLiked,
+				embedToken,
+				embedTokenExpiresAt
 			}
 		});
 	} catch (error) {
@@ -3079,12 +3120,27 @@ communityGamesRoute.get("/:id/file/*", async (c) => {
 	// browser navigate to it directly as a normal top-level page. Opened that way, none of the
 	// player page's <iframe sandbox="..."> restrictions apply (no opaque origin, popups/top-nav
 	// unrestricted, full permissions), so an attacker-uploaded game would run with full browser
-	// capabilities under a trusted davidnet.net subdomain - ideal for phishing. The Sec-Fetch-Dest
-	// request header (sent by all modern browsers, not spoofable by a page's own JS) says whether
-	// THIS request is for a nested browsing context ("iframe") or something else ("document" for a
-	// direct/typed navigation, "empty" for a fetch, etc.) - only documents loaded as an iframe may
-	// proceed. Fails open when the header is absent (very old browsers / non-browser clients) since
-	// that's a compatibility gap, not the phishing-via-real-browser threat this defends against.
+	// capabilities under a trusted davidnet.net subdomain - ideal for phishing. Two layers:
+	//
+	// 1. The embed token (see its doc comment above) - the REAL gate. GET /:id always mints a
+	//    fresh one and the player page always passes it when setting the iframe src, so a raw
+	//    copy-pasted/bookmarked/shared URL stops working once it expires, regardless of what the
+	//    requesting browser does or doesn't send. Scoped to exactly "index.html" (the entry
+	//    point a URL would actually be shared to), not every .html file, so a game that
+	//    internally navigates between multiple HTML pages isn't affected - that's still an
+	//    in-iframe navigation with no way for the game itself to mint a new token.
+	// 2. Sec-Fetch-Dest (sent by most modern browsers, not spoofable by a page's own JS) as a
+	//    cheap secondary check: reject outright if it's present and says this ISN'T a nested
+	//    browsing context. Fails open when absent (not every browser sends it) - that's fine,
+	//    the token above is what actually carries the security guarantee.
+	if (filePath === "index.html") {
+		if (!verifyEmbedToken(id, c.req.query("token"), c.req.query("expires"))) {
+			return c.json(
+				{ error: "This file can only be loaded inside the Davidnet game player." },
+				403
+			);
+		}
+	}
 	const secFetchDest = c.req.header("Sec-Fetch-Dest");
 	if (filePath.endsWith(".html") && secFetchDest && secFetchDest !== "iframe") {
 		return c.json(
