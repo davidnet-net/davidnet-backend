@@ -158,6 +158,16 @@ spec:
                 secretKeyRef:
                   name: headscale-secret
                   key: HEADSCALE_REDIRECT_URI
+            - name: FORGEJO_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-secret
+                  key: FORGEJO_CLIENT_SECRET
+            - name: FORGEJO_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-secret
+                  key: FORGEJO_REDIRECT_URI
             - name: REDIS_URL
               value: "redis://redis.redis.svc.cluster.local:6379"
             - name: REDIS_PASSWORD

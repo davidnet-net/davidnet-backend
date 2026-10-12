@@ -18,11 +18,13 @@ export const oidc = new Hono<Env>();
 
 const clientRequirements: Record<string, (access: typeof internalAccess.$inferSelect) => boolean> =
 	{
-		headscale: (access) => access.vpnAccess
+		headscale: (access) => access.vpnAccess,
+		forgejo: (access) => access.developerAccess
 	};
 
 const clientSecrets: Record<string, string | undefined> = {
-	headscale: process.env.HEADSCALE_CLIENT_SECRET
+	headscale: process.env.HEADSCALE_CLIENT_SECRET,
+	forgejo: process.env.FORGEJO_CLIENT_SECRET
 };
 
 // Exact-match allowlist of redirect_uri per client. Without this, /authorize would hand the
@@ -30,7 +32,8 @@ const clientSecrets: Record<string, string | undefined> = {
 // malicious page navigating a logged-in, VPN-enabled user's browser) steal a code and exchange
 // it for that user's internal OIDC/VPN access token.
 const clientRedirectUris: Record<string, string | undefined> = {
-	headscale: process.env.HEADSCALE_REDIRECT_URI
+	headscale: process.env.HEADSCALE_REDIRECT_URI,
+	forgejo: process.env.FORGEJO_REDIRECT_URI
 };
 
 oidc.get("/authorize", async (c) => {
