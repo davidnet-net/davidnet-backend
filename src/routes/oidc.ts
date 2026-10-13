@@ -277,6 +277,7 @@ oidc.post("/token", async (c) => {
 		preferred_username: user.username,
 		email: user.email,
 		name: user.displayName,
+		picture: user.avatarUrl,
 		nonce: savedCode.nonce
 	})
 		.setProtectedHeader({ alg: "RS256", kid: "internal-oidc-key-1" })
@@ -353,6 +354,7 @@ oidc.get("/userinfo", async (c) => {
 		preferred_username: user.username,
 		email: user.email,
 		name: user.displayName,
+		picture: user.avatarUrl,
 		email_verified: true
 	});
 });
