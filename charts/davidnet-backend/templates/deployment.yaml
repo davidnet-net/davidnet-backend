@@ -168,6 +168,36 @@ spec:
                 secretKeyRef:
                   name: forgejo-secret
                   key: FORGEJO_REDIRECT_URI
+            - name: MONITORING_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: monitoring-proxy-secret
+                  key: MONITORING_PROXY_CLIENT_SECRET
+            - name: MONITORING_PROXY_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: monitoring-proxy-secret
+                  key: MONITORING_PROXY_REDIRECT_URI
+            - name: DBS_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dbs-proxy-secret
+                  key: DBS_PROXY_CLIENT_SECRET
+            - name: DBS_PROXY_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: dbs-proxy-secret
+                  key: DBS_PROXY_REDIRECT_URI
+            - name: INFRA_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: infra-proxy-secret
+                  key: INFRA_PROXY_CLIENT_SECRET
+            - name: INFRA_PROXY_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: infra-proxy-secret
+                  key: INFRA_PROXY_REDIRECT_URI
             - name: REDIS_URL
               value: "redis://redis.redis.svc.cluster.local:6379"
             - name: REDIS_PASSWORD

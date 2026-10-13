@@ -19,12 +19,18 @@ export const oidc = new Hono<Env>();
 const clientRequirements: Record<string, (access: typeof internalAccess.$inferSelect) => boolean> =
 	{
 		headscale: (access) => access.vpnAccess,
-		forgejo: (access) => access.developerAccess
+		forgejo: (access) => access.developerAccess,
+		"monitoring-proxy": (access) => access.monitoringAccess,
+		"dbs-proxy": (access) => access.dbsAccess,
+		"infra-proxy": (access) => access.developerAccess
 	};
 
 const clientSecrets: Record<string, string | undefined> = {
 	headscale: process.env.HEADSCALE_CLIENT_SECRET,
-	forgejo: process.env.FORGEJO_CLIENT_SECRET
+	forgejo: process.env.FORGEJO_CLIENT_SECRET,
+	"monitoring-proxy": process.env.MONITORING_PROXY_CLIENT_SECRET,
+	"dbs-proxy": process.env.DBS_PROXY_CLIENT_SECRET,
+	"infra-proxy": process.env.INFRA_PROXY_CLIENT_SECRET
 };
 
 // Exact-match allowlist of redirect_uri per client. Without this, /authorize would hand the
@@ -33,7 +39,10 @@ const clientSecrets: Record<string, string | undefined> = {
 // it for that user's internal OIDC/VPN access token.
 const clientRedirectUris: Record<string, string | undefined> = {
 	headscale: process.env.HEADSCALE_REDIRECT_URI,
-	forgejo: process.env.FORGEJO_REDIRECT_URI
+	forgejo: process.env.FORGEJO_REDIRECT_URI,
+	"monitoring-proxy": process.env.MONITORING_PROXY_REDIRECT_URI,
+	"dbs-proxy": process.env.DBS_PROXY_REDIRECT_URI,
+	"infra-proxy": process.env.INFRA_PROXY_REDIRECT_URI
 };
 
 oidc.get("/authorize", async (c) => {
